@@ -148,7 +148,7 @@ class DeepHE3Kernel:
     def preprocess(self, preprocess_config):
         print('\n------- Preprocessing data -------')
         config = BaseConfig(preprocess_config)
-        self.get_graph(config)
+        self.get_graph(config, inference=config.inference)
     
     def train(self, train_config):
         self.load_config(train_config_path=train_config)
@@ -471,7 +471,7 @@ class DeepHE3Kernel:
                               target=config.target_data,
                               dataset_name=config.dataset_name,
                               multiprocessing=False,
-                              radius=-1,
+                              radius=config.radius,
                               max_num_nbr=0,
                               edge_Aij=True,
                               inference=inference,

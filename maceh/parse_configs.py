@@ -42,6 +42,8 @@ class BaseConfig:
         
         self.get_olp = self._config.getboolean('data', 'get_overlap')
         
+        self.radius = self._config.getfloat('data', 'radius')
+        
         self.only_ij = False # todo
     
     def set_dtype(self, dtype):
@@ -58,6 +60,7 @@ class BaseConfig:
         self.device = torch.device(self._config.get('basic', 'device'))
         dtype = self._config.get('basic', 'dtype')
         self.set_dtype(dtype)
+        self.inference = self._config.getboolean('basic', 'inference')
 
 class TrainConfig(BaseConfig):
     def __init__(self, config_file):

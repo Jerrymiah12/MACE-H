@@ -37,8 +37,8 @@ class MACEHCalculator(Calculator):
     """ASE Calculator that predicts Hamiltonians using a trained MACE-H model.
 
     The calculator loads a trained model from a checkpoint directory and
-    constructs periodic neighbor lists from the model's cutoff radius to
-    predict Hamiltonian matrix elements for any given structure.
+    constructs periodic neighbor lists to predict Hamiltonian matrix
+    elements for any given structure.
 
     Parameters
     ----------
@@ -46,6 +46,15 @@ class MACEHCalculator(Calculator):
         Path to trained model directory (must contain ``best_model.pkl``
         and ``src/``).  Can also be a parent directory; the model will
         be located by recursive search.
+    radius : float or dict or None
+        Cutoff radius used for neighbor-list construction.
+
+        - *None* (default): use the model's training cutoff for all pairs.
+        - *float*: uniform cutoff override for every species pair.
+        - *dict* ``{Z: r_Z, ...}``: per-species cutoffs keyed by atomic
+          number.  The cutoff for a pair (Z_i, Z_j) is
+          ``max(r_Zi, r_Zj)``.  Species not listed fall back to the
+          model's training cutoff.
     device : str
         Torch device, e.g. ``'cpu'`` or ``'cuda'``.
     dtype : str
@@ -57,8 +66,8 @@ class MACEHCalculator(Calculator):
 
     implemented_properties = ['hamiltonian']
 
-    def __init__(self, model_dir, device='cpu', dtype='float64', debug=False,
-                 **kwargs):
+    def __init__(self, model_dir, radius=None, device='cpu', dtype='float64',
+                 debug=False, **kwargs):
         super().__init__(**kwargs)
 
         self.model_device = device
@@ -73,6 +82,7 @@ class MACEHCalculator(Calculator):
 
         torch.set_default_dtype(self.torch_dtype)
         self._load_model(model_dir)
+        self._setup_cutoffs(radius)
 
     # ------------------------------------------------------------------
     # Model loading
@@ -151,6 +161,50 @@ class MACEHCalculator(Calculator):
             for orb_types in self.dataset_info.orbital_types
         ]
 
+    def _setup_cutoffs(self, radius):
+        """Build the per-species-pair cutoff matrix.
+
+        Parameters
+        ----------
+        radius : float, dict, or None
+            See ``__init__`` docstring.
+        """
+        n = len(self.dataset_info.index_to_Z)
+
+        if radius is None:
+            # uniform: model's training cutoff
+            self._pair_cutoffs = torch.full(
+                (n, n), self.cutoff_radius, dtype=self.torch_dtype
+            )
+        elif isinstance(radius, (int, float)):
+            # uniform override
+            self._pair_cutoffs = torch.full(
+                (n, n), float(radius), dtype=self.torch_dtype
+            )
+        elif isinstance(radius, dict):
+            # per-species; default to model cutoff for unlisted species
+            species_r = torch.full(
+                (n,), self.cutoff_radius, dtype=self.torch_dtype
+            )
+            for Z, r_Z in radius.items():
+                idx = self.dataset_info.Z_to_index[int(Z)].item()
+                if idx < 0:
+                    raise ValueError(
+                        f"Element Z={Z} not in model's training set "
+                        f"{self.dataset_info.index_to_Z.tolist()}"
+                    )
+                species_r[idx] = float(r_Z)
+            # pair cutoff = max of the two species radii
+            self._pair_cutoffs = torch.max(
+                species_r.unsqueeze(0), species_r.unsqueeze(1)
+            )
+        else:
+            raise TypeError(
+                f"radius must be None, float, or dict, got {type(radius)}"
+            )
+
+        self._r_max = self._pair_cutoffs.max().item()
+
     # ------------------------------------------------------------------
     # Graph construction from ASE Atoms
     # ------------------------------------------------------------------
@@ -164,7 +218,7 @@ class MACEHCalculator(Calculator):
         network and post-processing require.
         """
         dtype = self.torch_dtype
-        r = self.cutoff_radius
+        r = self._r_max               # global max for bounding box / images
         numerical_tol = 1e-8
 
         cart_coords = torch.tensor(atoms.get_positions(), dtype=dtype)
@@ -259,7 +313,10 @@ class MACEHCalculator(Calculator):
                 nn_indices.unsqueeze(1).int() + 1,
             ], dim=1)
 
-            mask = dist.lt(r + numerical_tol)
+            # per-pair cutoff: r_ij = max(r_Zi, r_Zj)
+            type_j = x[nn_indices.long()]
+            r_pair = self._pair_cutoffs[x[i_center], type_j]
+            mask = dist.lt(r_pair + numerical_tol)
             edge_idx_src.extend([i_center] * int(mask.sum()))
             edge_idx_dst.extend(nn_indices[mask].tolist())
             edge_fea_list.append(torch.cat([

@@ -66,7 +66,7 @@ class MACEHCalculator(Calculator):
 
     implemented_properties = ['hamiltonian']
 
-    def __init__(self, model_dir, radius=None, device='cpu', dtype='float64',
+    def __init__(self, model_dir, radius=None, device='cpu', dtype='float32',
                  debug=False, **kwargs):
         super().__init__(**kwargs)
 

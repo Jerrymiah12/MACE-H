@@ -1,0 +1,428 @@
+"""ASE Calculator for MACE-H Hamiltonian prediction.
+
+Provides a Calculator interface that loads a trained MACE-H model and
+predicts Hamiltonians for arbitrary ASE Atoms objects with periodic
+boundary conditions.
+
+Example
+-------
+    from maceh.calculator import MACEHCalculator
+    from ase.io import read
+
+    calc = MACEHCalculator(model_dir='/path/to/trained_model')
+    atoms = read('structure.cif')
+    calc.calculate(atoms)
+    H = calc.results['hamiltonian']
+    # H is a dict: "[Rx, Ry, Rz, i, j]" -> torch.Tensor of shape [n_orb_i, n_orb_j]
+"""
+
+import os
+import sys
+import itertools
+import collections
+from configparser import ConfigParser
+
+import numpy as np
+import torch
+from torch_geometric.data import Data, Batch
+from ase.calculators.calculator import Calculator, all_changes
+
+from .kernel import DatasetInfo, NetOutInfo
+from .e3modules import e3TensorDecomp
+from .utils import flt2cplx
+from .from_pymatgen.lattice import find_neighbors, _compute_cube_index, _three_to_one
+
+
+class MACEHCalculator(Calculator):
+    """ASE Calculator that predicts Hamiltonians using a trained MACE-H model.
+
+    The calculator loads a trained model from a checkpoint directory and
+    constructs periodic neighbor lists from the model's cutoff radius to
+    predict Hamiltonian matrix elements for any given structure.
+
+    Parameters
+    ----------
+    model_dir : str
+        Path to trained model directory (must contain ``best_model.pkl``
+        and ``src/``).  Can also be a parent directory; the model will
+        be located by recursive search.
+    device : str
+        Torch device, e.g. ``'cpu'`` or ``'cuda'``.
+    dtype : str
+        ``'float32'`` or ``'float64'``.
+    debug : bool
+        If True, fill unpredicted matrix elements with 0 instead of
+        raising an error.
+    """
+
+    implemented_properties = ['hamiltonian']
+
+    def __init__(self, model_dir, device='cpu', dtype='float64', debug=False,
+                 **kwargs):
+        super().__init__(**kwargs)
+
+        self.model_device = device
+        self.debug = debug
+
+        if dtype in ('float64', 'double'):
+            self.torch_dtype = torch.float64
+            self.np_dtype = np.float64
+        else:
+            self.torch_dtype = torch.float32
+            self.np_dtype = np.float32
+
+        torch.set_default_dtype(self.torch_dtype)
+        self._load_model(model_dir)
+
+    # ------------------------------------------------------------------
+    # Model loading
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _find_model_path(model_dir):
+        """Locate a model directory containing best_model.pkl and src/."""
+        if (os.path.isfile(os.path.join(model_dir, 'best_model.pkl'))
+                and os.path.isdir(os.path.join(model_dir, 'src'))):
+            return model_dir
+        for root, dirs, files in os.walk(model_dir):
+            if 'best_model.pkl' in files and 'src' in dirs:
+                return os.path.abspath(root)
+        raise FileNotFoundError(
+            f"Cannot find a trained model (best_model.pkl + src/) "
+            f"under {model_dir}"
+        )
+
+    def _load_model(self, model_dir):
+        """Load the trained MACE-H model and all required metadata."""
+        model_path = self._find_model_path(model_dir)
+        src_path = os.path.join(model_path, 'src')
+
+        # --- dataset info (orbital types, element list, spinful flag) ---
+        self.dataset_info = DatasetInfo.from_json(src_path)
+
+        # --- target block definitions ---
+        self.net_out_info = NetOutInfo.from_json(src_path)
+
+        # --- config values from train.ini (without TrainConfig side effects) ---
+        config = ConfigParser(inline_comment_prefixes=(';',))
+        default_ini = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'default_configs/train_default.ini',
+        )
+        if os.path.isfile(default_ini):
+            config.read(default_ini)
+        config.read(os.path.join(src_path, 'train.ini'))
+
+        self.cutoff_radius = config.getfloat('network', 'cutoff_radius')
+        no_parity = config.getboolean('network', 'ignore_parity')
+        convert_net_out = config.getboolean('target', 'convert_net_out')
+
+        # --- e3TensorDecomp: converts raw edge output to H blocks ---
+        self.construct_kernel = e3TensorDecomp(
+            net_irreps_out=None,   # assertion skipped; irreps inferred from js
+            out_js_list=self.net_out_info.js,
+            default_dtype_torch=self.torch_dtype,
+            spinful=self.dataset_info.spinful,
+            no_parity=no_parity,
+            if_sort=convert_net_out,
+            device_torch=self.model_device,
+        )
+
+        # --- neural network ---
+        sys.path.insert(0, src_path)
+        try:
+            from build_model import net  # auto-generated during training
+        finally:
+            sys.path.remove(src_path)
+            sys.modules.pop('build_model', None)
+
+        checkpoint = torch.load(
+            os.path.join(model_path, 'best_model.pkl'),
+            map_location='cpu',
+        )
+        net.load_state_dict(checkpoint['state_dict'])
+        net.to(self.model_device)
+        net.eval()
+        self.net = net
+
+        # --- orbital bookkeeping ---
+        self._atom_num_orbital = [
+            sum(2 * l + 1 for l in orb_types)
+            for orb_types in self.dataset_info.orbital_types
+        ]
+
+    # ------------------------------------------------------------------
+    # Graph construction from ASE Atoms
+    # ------------------------------------------------------------------
+
+    def _build_graph(self, atoms):
+        """Build a PyG ``Data`` object with a periodic neighbor list.
+
+        This replicates the ``create_from_DFT=False`` branch of
+        :func:`maceh.graph.get_graph`, adding the extra fields
+        (``atom_num_orbital``, ``spinful``, ``edge_key``) that the
+        network and post-processing require.
+        """
+        dtype = self.torch_dtype
+        r = self.cutoff_radius
+        numerical_tol = 1e-8
+
+        cart_coords = torch.tensor(atoms.get_positions(), dtype=dtype)
+        frac_coords = torch.tensor(atoms.get_scaled_positions(), dtype=dtype)
+        lattice = torch.tensor(atoms.get_cell().array, dtype=dtype)
+        numbers = torch.tensor(atoms.get_atomic_numbers(), dtype=torch.long)
+
+        # Map raw atomic numbers -> model type indices
+        x = self.dataset_info.Z_to_index[numbers].clone()
+        if torch.any(x < 0):
+            unknown = numbers[x < 0].unique().tolist()
+            known = self.dataset_info.index_to_Z.tolist()
+            raise ValueError(
+                f"Structure contains elements {unknown} not in the "
+                f"model's training set {known}"
+            )
+
+        num_atom = cart_coords.shape[0]
+
+        # --- determine bounding box for image filtering ---
+        cart_np = cart_coords.numpy()
+        frac_np = frac_coords.numpy()
+        lat_np = lattice.numpy()
+
+        global_min = np.min(cart_np, axis=0) - r - numerical_tol
+        global_max = np.max(cart_np, axis=0) + r + numerical_tol
+        global_min_t = torch.tensor(global_min)
+        global_max_t = torch.tensor(global_max)
+
+        # --- enumerate required lattice images ---
+        recip = np.linalg.inv(lat_np).T * 2 * np.pi
+        recp_len = np.sqrt(np.sum(recip ** 2, axis=1))
+        maxr = np.ceil((r + 0.15) * recp_len / (2 * np.pi))
+        nmin = np.floor(np.min(frac_np, axis=0)) - maxr
+        nmax = np.ceil(np.max(frac_np, axis=0)) + maxr
+        all_ranges = [np.arange(lo, hi, dtype='int64')
+                      for lo, hi in zip(nmin, nmax)]
+        images = torch.tensor(
+            list(itertools.product(*all_ranges))
+        ).type_as(lattice)
+
+        # --- compute all image coordinates and filter ---
+        coords = (images @ lattice)[:, None, :] + cart_coords[None, :, :]
+        indices = torch.arange(num_atom).unsqueeze(0).expand(
+            images.shape[0], num_atom
+        )
+        valid = (coords.gt(global_min_t) * coords.lt(global_max_t)).all(dim=-1)
+        valid_coords = coords[valid]
+        valid_indices = indices[valid]
+
+        # --- spatial hashing into cubes ---
+        valid_np = valid_coords.detach().numpy()
+        all_cube = _compute_cube_index(valid_np, global_min, r)
+        nx, ny, nz = _compute_cube_index(global_max, global_min, r) + 1
+        all_cube_1d = _three_to_one(all_cube, ny, nz)
+        site_cube = _three_to_one(
+            _compute_cube_index(cart_np, global_min, r), ny, nz
+        )
+
+        cube_map = collections.defaultdict(list)
+        for idx, cube_id in enumerate(all_cube_1d.ravel()):
+            cube_map[cube_id].append(idx)
+
+        site_nbrs = find_neighbors(site_cube, nx, ny, nz)
+
+        # --- find edges within cutoff for each center atom ---
+        inv_lattice = torch.inverse(lattice).type(dtype)
+        edge_idx_src, edge_idx_dst = [], []
+        edge_fea_list, edge_key_list = [], []
+
+        for i_center, (cart_i, nbr_cubes) in enumerate(
+            zip(cart_coords, site_nbrs)
+        ):
+            l1 = np.array(_three_to_one(nbr_cubes, ny, nz), dtype=int).ravel()
+            ks = [k for k in l1 if k in cube_map]
+            nn_idx = np.concatenate([cube_map[k] for k in ks], axis=0)
+            nn_coords = valid_coords[nn_idx]
+            nn_indices = valid_indices[nn_idx]
+            dist = torch.norm(nn_coords - cart_i[None, :], dim=1)
+
+            nn_coords = nn_coords.squeeze()
+            nn_indices = nn_indices.squeeze()
+            dist = dist.squeeze()
+
+            # R-vector: integer lattice translation
+            R = torch.round(
+                (nn_coords - cart_coords[nn_indices]) @ inv_lattice
+            ).int()
+            ek = torch.cat([
+                R,
+                torch.full([R.shape[0], 1], i_center, dtype=torch.int) + 1,
+                nn_indices.unsqueeze(1).int() + 1,
+            ], dim=1)
+
+            mask = dist.lt(r + numerical_tol)
+            edge_idx_src.extend([i_center] * int(mask.sum()))
+            edge_idx_dst.extend(nn_indices[mask].tolist())
+            edge_fea_list.append(torch.cat([
+                dist[mask].view(-1, 1),
+                nn_coords[mask] - cart_i,
+            ], dim=-1))
+            edge_key_list.append(ek[mask])
+
+        edge_fea = torch.cat(edge_fea_list).type(dtype)
+        edge_index = torch.stack([
+            torch.LongTensor(edge_idx_src),
+            torch.LongTensor(edge_idx_dst),
+        ])
+        edge_key = torch.cat(edge_key_list, dim=0)
+
+        atom_num_orbital = torch.tensor(
+            [self._atom_num_orbital[xi] for xi in x]
+        )
+
+        return Data(
+            x=x,
+            edge_index=edge_index,
+            edge_attr=edge_fea,
+            pos=cart_coords.type(dtype),
+            lattice=lattice.unsqueeze(0),
+            edge_key=edge_key,
+            Aij=None,
+            Aij_mask=None,
+            atom_num_orbital=atom_num_orbital,
+            spinful=self.dataset_info.spinful,
+            stru_id='ase_atoms',
+        )
+
+    # ------------------------------------------------------------------
+    # Hamiltonian assembly from network output
+    # ------------------------------------------------------------------
+
+    def _update_hopping(self, H_pred, node_attr, edge_index, edge_key):
+        """Convert the raw network prediction into a Hamiltonian dict.
+
+        Adapted from :meth:`DeepHE3Kernel.update_hopping`.
+
+        Returns
+        -------
+        dict
+            Keys are ``"[Rx, Ry, Rz, i, j]"`` strings (1-based atom
+            indices).  Values are ``torch.Tensor`` of shape
+            ``[n_orb_i, n_orb_j]`` (or ``[2*n_orb_i, 2*n_orb_j]``
+            when spinful).
+        """
+        dtype = self.torch_dtype
+        spinful = self.dataset_info.spinful
+        atom_num_orb = self._atom_num_orbital
+        index_to_Z = self.dataset_info.index_to_Z
+
+        H_dict = {}
+
+        for ie in range(edge_index.shape[1]):
+            key_str = str(edge_key[ie].tolist())
+            i_type, j_type = node_attr[edge_index[:, ie]]
+
+            # initialise matrix for this (R, i, j) pair
+            if key_str not in H_dict:
+                fill = 0 if self.debug else np.nan
+                fill_c = complex(fill, fill) if np.isnan(fill) else 0 + 0j
+                if spinful:
+                    H_dict[key_str] = torch.full(
+                        (atom_num_orb[i_type] * 2,
+                         atom_num_orb[j_type] * 2),
+                        fill_c, dtype=flt2cplx(dtype),
+                    )
+                else:
+                    H_dict[key_str] = torch.full(
+                        (atom_num_orb[i_type], atom_num_orb[j_type]),
+                        fill, dtype=dtype,
+                    )
+
+            Z_pair = (f'{index_to_Z[i_type].item()} '
+                      f'{index_to_Z[j_type].item()}')
+
+            for it, block in enumerate(self.net_out_info.blocks):
+                for nm_str, bslice in block.items():
+                    if nm_str != Z_pair:
+                        continue
+                    sr = slice(bslice[0], bslice[1])
+                    sc = slice(bslice[2], bslice[3])
+                    lr = bslice[1] - bslice[0]
+                    lc = bslice[3] - bslice[2]
+                    so = slice(self.net_out_info.slices[it],
+                               self.net_out_info.slices[it + 1])
+
+                    if spinful:
+                        sr_ds = slice(atom_num_orb[i_type] + bslice[0],
+                                      atom_num_orb[i_type] + bslice[1])
+                        sc_ds = slice(atom_num_orb[j_type] + bslice[2],
+                                      atom_num_orb[j_type] + bslice[3])
+                        H_dict[key_str][sr, sc] = \
+                            H_pred[ie, 0, so].reshape(lr, lc)
+                        H_dict[key_str][sr, sc_ds] = \
+                            H_pred[ie, 1, so].reshape(lr, lc)
+                        H_dict[key_str][sr_ds, sc] = \
+                            H_pred[ie, 2, so].reshape(lr, lc)
+                        H_dict[key_str][sr_ds, sc_ds] = \
+                            H_pred[ie, 3, so].reshape(lr, lc)
+                    else:
+                        H_dict[key_str][sr, sc] = \
+                            H_pred[ie, so].reshape(lr, lc)
+
+        return H_dict
+
+    # ------------------------------------------------------------------
+    # ASE Calculator interface
+    # ------------------------------------------------------------------
+
+    def calculate(self, atoms=None, properties=None, system_changes=all_changes):
+        if properties is None:
+            properties = self.implemented_properties
+        super().calculate(atoms, properties, system_changes)
+
+        data = self._build_graph(self.atoms)
+        batch = Batch.from_data_list([data])
+
+        with torch.no_grad():
+            _node_out, edge_out = self.net(batch.to(device=self.model_device))
+            H_pred = self.construct_kernel.get_H(edge_out).cpu()
+
+        H_dict = self._update_hopping(
+            H_pred,
+            batch.x.cpu(),
+            batch.edge_index.cpu(),
+            batch.edge_key.cpu(),
+        )
+
+        if not self.debug:
+            for key, val in H_dict.items():
+                has_nan = torch.any(torch.isnan(val))
+                if has_nan:
+                    raise RuntimeError(
+                        f"Unpredicted orbital blocks remain for edge {key}. "
+                        "Use debug=True to fill them with 0."
+                    )
+
+        self.results['hamiltonian'] = H_dict
+
+    def get_hamiltonian(self, atoms=None):
+        """Convenience wrapper: predict and return the Hamiltonian dict.
+
+        Parameters
+        ----------
+        atoms : ase.Atoms, optional
+            Structure to predict.  If *None*, reuses the last-set atoms.
+
+        Returns
+        -------
+        dict
+            Hamiltonian dictionary.  Keys are ``"[Rx, Ry, Rz, i, j]"``
+            strings with **1-based** atom indices.  Values are tensors
+            of shape ``[n_orb_i, n_orb_j]``.
+        """
+        if atoms is not None:
+            self.calculate(atoms)
+        elif self.atoms is not None:
+            self.calculate(self.atoms)
+        else:
+            raise ValueError("No atoms provided and none previously set.")
+        return self.results['hamiltonian']

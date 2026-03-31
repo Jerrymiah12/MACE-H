@@ -54,7 +54,7 @@ class MACEHCalculator(Calculator):
         - *float*: uniform cutoff override for every species pair.
         - *dict* ``{Z: r_Z, ...}``: per-species cutoffs keyed by atomic
           number.  The cutoff for a pair (Z_i, Z_j) is
-          ``max(r_Zi, r_Zj)``.  Species not listed fall back to the
+          ``r_Zi + r_Zj``.  Species not listed fall back to the
           model's training cutoff.
     device : str
         Torch device, e.g. ``'cpu'`` or ``'cuda'``.
@@ -195,9 +195,9 @@ class MACEHCalculator(Calculator):
                         f"{self.dataset_info.index_to_Z.tolist()}"
                     )
                 species_r[idx] = float(r_Z)
-            # pair cutoff = max of the two species radii
-            self._pair_cutoffs = torch.max(
-                species_r.unsqueeze(0), species_r.unsqueeze(1)
+            # pair cutoff = sum of the two species radii
+            self._pair_cutoffs = (
+                species_r.unsqueeze(0) + species_r.unsqueeze(1)
             )
         else:
             raise TypeError(

@@ -433,7 +433,7 @@ class MACEHCalculator(Calculator):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def hermicity_error(H_dict, p=2):
+    def hermicity_error(H_dict, p=1):
         """Element-wise Hermiticity error for each block in the Hamiltonian.
 
         For each key ``[Rx, Ry, Rz, i, j]``, computes

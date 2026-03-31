@@ -18,6 +18,7 @@ Example
 
 import os
 import sys
+import json
 import itertools
 import collections
 from configparser import ConfigParser
@@ -426,6 +427,93 @@ class MACEHCalculator(Calculator):
                             H_pred[ie, so].reshape(lr, lc)
 
         return H_dict
+
+    # ------------------------------------------------------------------
+    # Hermiticity analysis
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def hermicity_error(H_dict, p=2):
+        """Element-wise Hermiticity error for each block in the Hamiltonian.
+
+        For each key ``[Rx, Ry, Rz, i, j]``, computes
+
+        .. math::
+
+            |H_{R,i,j} - H_{-R,j,i}^\\dagger|^p
+
+        element-wise, where :math:`\\dagger` denotes conjugate transpose
+        (reduces to transpose for real / non-spinful Hamiltonians).
+
+        Parameters
+        ----------
+        H_dict : dict
+            Hamiltonian dictionary as returned by :meth:`calculate`.
+        p : int or float
+            Exponent for the element-wise error.  Default 2.
+
+        Returns
+        -------
+        dict
+            Same keys as *H_dict*.  Values are real-valued tensors of the
+            same shape containing the element-wise error.
+        """
+        error_dict = {}
+        for key_str, H_block in H_dict.items():
+            Rx, Ry, Rz, i, j = json.loads(key_str)
+            conj_key = str([-Rx, -Ry, -Rz, j, i])
+            if conj_key not in H_dict:
+                raise KeyError(
+                    f"Conjugate key {conj_key} not found for {key_str}. "
+                    "The neighbor list should be symmetric."
+                )
+            H_conj = H_dict[conj_key]
+            error_dict[key_str] = torch.abs(H_block - H_conj.T.conj()) ** p
+        return error_dict
+
+    @staticmethod
+    def mean_hermicity_error(error_dict):
+        """Mean Hermiticity error over all blocks.
+
+        Every non-trivially-zero error value appears exactly twice in the
+        error dictionary: off-diagonal key pairs ``(R, i, j)`` and
+        ``(-R, j, i)`` carry duplicate blocks, and within on-site blocks
+        ``(R=0, i=i)`` the off-diagonal elements satisfy
+        ``err[a, b] = err[b, a]``.  The only non-duplicated entries are
+        the diagonal elements of on-site blocks, which are zero by
+        construction.  Since the duplication factor is the same in both
+        the numerator (sum) and denominator (count), it cancels, giving
+
+        .. math::
+
+            \\frac{\\sum_{\\text{all keys, all elements}} \\mathrm{err}}
+                  {N_{\\text{total}} - N_{\\text{on-site diag}}}
+
+        Parameters
+        ----------
+        error_dict : dict
+            Output of :meth:`hermicity_error`.
+
+        Returns
+        -------
+        float
+            Mean Hermiticity error.
+        """
+        total_sum = 0.0
+        total_count = 0
+        on_site_diag_count = 0
+
+        for key_str, err in error_dict.items():
+            Rx, Ry, Rz, i, j = json.loads(key_str)
+            total_sum += err.sum().item()
+            total_count += err.numel()
+            if Rx == 0 and Ry == 0 and Rz == 0 and i == j:
+                on_site_diag_count += err.shape[0]
+
+        denominator = total_count - on_site_diag_count
+        if denominator == 0:
+            return 0.0
+        return total_sum / denominator
 
     # ------------------------------------------------------------------
     # ASE Calculator interface

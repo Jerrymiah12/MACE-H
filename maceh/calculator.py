@@ -150,6 +150,7 @@ class MACEHCalculator(Calculator):
         checkpoint = torch.load(
             os.path.join(model_path, 'best_model.pkl'),
             map_location='cpu',
+            weights_only=False,
         )
         net.load_state_dict(checkpoint['state_dict'])
         net.to(self.model_device)

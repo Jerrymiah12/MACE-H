@@ -23,6 +23,7 @@ import itertools
 import collections
 from configparser import ConfigParser
 
+import h5py
 import numpy as np
 import torch
 from torch_geometric.data import Data, Batch
@@ -603,6 +604,130 @@ class MACEHCalculator(Calculator):
         else:
             raise ValueError("No atoms provided and none previously set.")
         return self.results['hamiltonian']
+
+    # ------------------------------------------------------------------
+    # DeepH-E3 metadata export
+    # ------------------------------------------------------------------
+
+    def write_metadata(self, output_dir, atoms=None):
+        """Write DeepH-E3 / MACE-H metadata files for a structure.
+
+        Produces the six metadata files that the preprocessing pipeline
+        emits alongside ``hamiltonians.h5`` and ``overlaps.h5``:
+
+        - ``info.json``          — ``{"isspinful": bool}``
+        - ``lat.dat``            — real-space lattice, 3x3
+        - ``rlat.dat``           — reciprocal lattice (with the 2*pi
+          factor), 3x3
+        - ``element.dat``        — atomic numbers, one per atom
+        - ``site_positions.dat`` — Cartesian positions, 3xN
+        - ``orbital_types.dat``  — per-atom orbital angular momenta
+
+        Lattice vectors and atomic coordinates are written as **columns**
+        (i.e. transposed relative to ASE's row-wise cell convention),
+        matching :func:`maceh.data.AijData.process_worker` which loads
+        them with ``np.loadtxt(...).T``.
+
+        Parameters
+        ----------
+        output_dir : str
+            Destination directory.  Created if it does not exist.
+        atoms : ase.Atoms, optional
+            Structure to export.  If *None*, uses the atoms currently
+            attached to the calculator.
+        """
+        if atoms is None:
+            if self.atoms is None:
+                raise ValueError("No atoms provided and none previously set.")
+            atoms = self.atoms
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        numbers = np.asarray(atoms.get_atomic_numbers(), dtype=np.int64)
+        indices = self.dataset_info.Z_to_index[torch.from_numpy(numbers)]
+        if torch.any(indices < 0):
+            unknown = sorted({int(z) for z, i in zip(numbers, indices.tolist())
+                              if i < 0})
+            known = self.dataset_info.index_to_Z.tolist()
+            raise ValueError(
+                f"Structure contains elements {unknown} not in the "
+                f"model's training set {known}"
+            )
+
+        with open(os.path.join(output_dir, 'info.json'), 'w') as f:
+            json.dump({'isspinful': bool(self.dataset_info.spinful)},
+                      f, indent=4)
+
+        L = np.asarray(atoms.get_cell().array, dtype=np.float64)
+        np.savetxt(os.path.join(output_dir, 'lat.dat'), L.T, delimiter='\t')
+        np.savetxt(os.path.join(output_dir, 'rlat.dat'),
+                   2.0 * np.pi * np.linalg.inv(L), delimiter='\t')
+
+        np.savetxt(os.path.join(output_dir, 'element.dat'), numbers, fmt='%d')
+
+        positions = np.asarray(atoms.get_positions(), dtype=np.float64)
+        np.savetxt(os.path.join(output_dir, 'site_positions.dat'),
+                   positions.T, delimiter='\t')
+
+        with open(os.path.join(output_dir, 'orbital_types.dat'), 'w') as f:
+            for idx in indices.tolist():
+                orbs = self.dataset_info.orbital_types[idx]
+                f.write('\t'.join(str(int(l)) for l in orbs) + '\n')
+
+    def write_results(self, output_dir, atoms=None, metadata=True, data=True):
+        """Write predicted Hamiltonian and/or structure metadata to disk.
+
+        The destination folder mirrors the DeepH-E3 preprocessed-data
+        layout: metadata files (``info.json``, ``lat.dat``, ``rlat.dat``,
+        ``element.dat``, ``site_positions.dat``, ``orbital_types.dat``)
+        together with ``hamiltonians.h5`` holding the predicted matrix
+        blocks.  Each dataset in the HDF5 file is keyed by the
+        ``"[Rx, Ry, Rz, i, j]"`` string used everywhere else in the
+        pipeline (1-based atom indices).
+
+        Parameters
+        ----------
+        output_dir : str
+            Destination directory.  Created if missing.
+        atoms : ase.Atoms, optional
+            Structure to export.  If *None*, uses the atoms currently
+            attached to the calculator.
+        metadata : bool
+            If True, write the six metadata files (see
+            :meth:`write_metadata`).
+        data : bool
+            If True, compute (or reuse) the predicted Hamiltonian and
+            write it to ``hamiltonians.h5``.
+
+        Notes
+        -----
+        Set ``metadata=False`` to write only ``hamiltonians.h5``, or
+        ``data=False`` to write only metadata.  Both flags False is an
+        error.
+        """
+        if not (metadata or data):
+            raise ValueError(
+                "Nothing to write: set metadata=True and/or data=True."
+            )
+        if atoms is None:
+            if self.atoms is None:
+                raise ValueError("No atoms provided and none previously set.")
+            atoms = self.atoms
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        if metadata:
+            self.write_metadata(output_dir, atoms=atoms)
+
+        if data:
+            self.calculate(atoms)
+            H_dict = self.results['hamiltonian']
+            h5_path = os.path.join(output_dir, 'hamiltonians.h5')
+            with h5py.File(h5_path, 'w') as f:
+                for key, block in H_dict.items():
+                    if isinstance(block, torch.Tensor):
+                        block = block.detach().cpu().numpy()
+                    f[key] = np.asarray(block)
 
     def get_hamiltonian_uncertainty(self, atoms=None):
         """Convenience wrapper: predict and return the uncertainty dict.

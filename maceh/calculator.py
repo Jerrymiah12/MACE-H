@@ -63,16 +63,35 @@ class MACEHCalculator(Calculator):
     debug : bool
         If True, fill unpredicted matrix elements with 0 instead of
         raising an error.
+    uncertainty_method : str or None
+        Method used to estimate Hamiltonian uncertainty.  When set, the
+        chosen estimator is evaluated in :meth:`calculate` and stored
+        under ``self.results['hamiltonian_uncertainty']``.
+
+        - *None* (default): no uncertainty is computed.
+        - ``'hermicity'``: element-wise Hermiticity error
+          :math:`|H_{R,i,j} - H_{-R,j,i}^\\dagger|^p` per block
+          (see :meth:`hermicity_error`).
     """
 
-    implemented_properties = ['hamiltonian']
+    implemented_properties = ['hamiltonian', 'hamiltonian_uncertainty']
+
+    _UNCERTAINTY_METHODS = ('hermicity',)
 
     def __init__(self, model_dir, radius=None, device='cpu', dtype='float32',
-                 debug=False, **kwargs):
+                 debug=False, uncertainty_method=None, **kwargs):
         super().__init__(**kwargs)
 
         self.model_device = device
         self.debug = debug
+
+        if uncertainty_method is not None \
+                and uncertainty_method not in self._UNCERTAINTY_METHODS:
+            raise ValueError(
+                f"Unknown uncertainty_method {uncertainty_method!r}. "
+                f"Supported: {self._UNCERTAINTY_METHODS} or None."
+            )
+        self.uncertainty_method = uncertainty_method
 
         if dtype in ('float64', 'double'):
             self.torch_dtype = torch.float64
@@ -550,6 +569,18 @@ class MACEHCalculator(Calculator):
 
         self.results['hamiltonian'] = H_dict
 
+        if self.uncertainty_method is not None:
+            self.results['hamiltonian_uncertainty'] = \
+                self._compute_uncertainty(H_dict)
+
+    def _compute_uncertainty(self, H_dict):
+        """Dispatch to the configured uncertainty estimator."""
+        if self.uncertainty_method == 'hermicity':
+            return self.hermicity_error(H_dict)
+        raise ValueError(
+            f"Unknown uncertainty_method {self.uncertainty_method!r}."
+        )
+
     def get_hamiltonian(self, atoms=None):
         """Convenience wrapper: predict and return the Hamiltonian dict.
 
@@ -572,3 +603,32 @@ class MACEHCalculator(Calculator):
         else:
             raise ValueError("No atoms provided and none previously set.")
         return self.results['hamiltonian']
+
+    def get_hamiltonian_uncertainty(self, atoms=None):
+        """Convenience wrapper: predict and return the uncertainty dict.
+
+        Requires the calculator to have been constructed with a non-None
+        ``uncertainty_method``.
+
+        Parameters
+        ----------
+        atoms : ase.Atoms, optional
+            Structure to predict.  If *None*, reuses the last-set atoms.
+
+        Returns
+        -------
+        dict
+            Same keys as the Hamiltonian dict; values are the
+            uncertainty per block as defined by the configured method.
+        """
+        if self.uncertainty_method is None:
+            raise ValueError(
+                "No uncertainty_method was set on the calculator. "
+            )
+        if atoms is not None:
+            self.calculate(atoms)
+        elif self.atoms is not None:
+            self.calculate(self.atoms)
+        else:
+            raise ValueError("No atoms provided and none previously set.")
+        return self.results['hamiltonian_uncertainty']

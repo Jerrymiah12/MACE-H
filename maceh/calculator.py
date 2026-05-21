@@ -73,6 +73,14 @@ class MACEHCalculator(Calculator):
         - ``'hermicity'``: element-wise Hermiticity error
           :math:`|H_{R,i,j} - H_{-R,j,i}^\\dagger|^p` per block
           (see :meth:`hermicity_error`).
+    symmetrize : bool
+        If True, the predicted Hamiltonian is Hermitised before being
+        stored in ``self.results['hamiltonian']`` via
+        :math:`H_{R,i,j} \\leftarrow \\tfrac12(H_{R,i,j}
+        + H_{-R,j,i}^\\dagger)` (see :meth:`symmetrize_hamiltonian`).
+        Can be overridden per call via the ``symmetrize`` argument of
+        :meth:`calculate`.  Uncertainty estimators are always evaluated
+        on the raw (non-symmetrised) Hamiltonian.
     """
 
     implemented_properties = ['hamiltonian', 'hamiltonian_uncertainty']
@@ -80,11 +88,13 @@ class MACEHCalculator(Calculator):
     _UNCERTAINTY_METHODS = ('hermicity',)
 
     def __init__(self, model_dir, radius=None, device='cpu', dtype='float32',
-                 debug=False, uncertainty_method=None, **kwargs):
+                 debug=False, uncertainty_method=None, symmetrize=False,
+                 **kwargs):
         super().__init__(**kwargs)
 
         self.model_device = device
         self.debug = debug
+        self.symmetrize = symmetrize
 
         if uncertainty_method is not None \
                 and uncertainty_method not in self._UNCERTAINTY_METHODS:
@@ -454,6 +464,39 @@ class MACEHCalculator(Calculator):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def symmetrize_hamiltonian(H_dict):
+        """Return a Hermitised copy of the Hamiltonian dictionary.
+
+        For each key ``[Rx, Ry, Rz, i, j]``, replaces the block with
+
+        .. math::
+
+            H_{R,i,j} \\leftarrow \\tfrac12
+            \\bigl(H_{R,i,j} + H_{-R,j,i}^\\dagger\\bigr).
+
+        Parameters
+        ----------
+        H_dict : dict
+            Hamiltonian dictionary as returned by :meth:`calculate`.
+
+        Returns
+        -------
+        dict
+            Same keys as *H_dict*; values are the symmetrised blocks.
+        """
+        sym_dict = {}
+        for key_str, H_block in H_dict.items():
+            Rx, Ry, Rz, i, j = json.loads(key_str)
+            conj_key = str([-Rx, -Ry, -Rz, j, i])
+            if conj_key not in H_dict:
+                raise KeyError(
+                    f"Conjugate key {conj_key} not found for {key_str}. "
+                    "The neighbor list should be symmetric."
+                )
+            sym_dict[key_str] = 0.5 * (H_block + H_dict[conj_key].T.conj())
+        return sym_dict
+
+    @staticmethod
     def hermicity_error(H_dict, p=1):
         """Element-wise Hermiticity error for each block in the Hamiltonian.
 
@@ -540,10 +583,26 @@ class MACEHCalculator(Calculator):
     # ASE Calculator interface
     # ------------------------------------------------------------------
 
-    def calculate(self, atoms=None, properties=None, system_changes=all_changes):
+    def calculate(self, atoms=None, properties=None, system_changes=all_changes,
+                  symmetrize=None):
+        """Predict the Hamiltonian for ``atoms`` and store it in ``results``.
+
+        Parameters
+        ----------
+        atoms, properties, system_changes
+            Standard ASE Calculator arguments.
+        symmetrize : bool or None
+            Per-call override of ``self.symmetrize``.  If *None*
+            (default), uses the value set at construction time.  When
+            True the stored Hamiltonian is Hermitised; uncertainty
+            estimators are always evaluated on the raw prediction.
+        """
         if properties is None:
             properties = self.implemented_properties
         super().calculate(atoms, properties, system_changes)
+
+        if symmetrize is None:
+            symmetrize = self.symmetrize
 
         data = self._build_graph(self.atoms)
         batch = Batch.from_data_list([data])
@@ -568,11 +627,16 @@ class MACEHCalculator(Calculator):
                         "Use debug=True to fill them with 0."
                     )
 
-        self.results['hamiltonian'] = H_dict
-
+        # Uncertainty must be evaluated on the raw H — after symmetrisation
+        # the hermicity error is exactly zero by construction.
         if self.uncertainty_method is not None:
             self.results['hamiltonian_uncertainty'] = \
                 self._compute_uncertainty(H_dict)
+
+        if symmetrize:
+            H_dict = self.symmetrize_hamiltonian(H_dict)
+
+        self.results['hamiltonian'] = H_dict
 
     def _compute_uncertainty(self, H_dict):
         """Dispatch to the configured uncertainty estimator."""
@@ -582,13 +646,16 @@ class MACEHCalculator(Calculator):
             f"Unknown uncertainty_method {self.uncertainty_method!r}."
         )
 
-    def get_hamiltonian(self, atoms=None):
+    def get_hamiltonian(self, atoms=None, symmetrize=None):
         """Convenience wrapper: predict and return the Hamiltonian dict.
 
         Parameters
         ----------
         atoms : ase.Atoms, optional
             Structure to predict.  If *None*, reuses the last-set atoms.
+        symmetrize : bool or None
+            Per-call override of ``self.symmetrize`` (see
+            :meth:`calculate`).
 
         Returns
         -------
@@ -597,12 +664,11 @@ class MACEHCalculator(Calculator):
             strings with **1-based** atom indices.  Values are tensors
             of shape ``[n_orb_i, n_orb_j]``.
         """
-        if atoms is not None:
-            self.calculate(atoms)
-        elif self.atoms is not None:
-            self.calculate(self.atoms)
-        else:
-            raise ValueError("No atoms provided and none previously set.")
+        if atoms is None:
+            if self.atoms is None:
+                raise ValueError("No atoms provided and none previously set.")
+            atoms = self.atoms
+        self.calculate(atoms, symmetrize=symmetrize)
         return self.results['hamiltonian']
 
     # ------------------------------------------------------------------
@@ -613,7 +679,7 @@ class MACEHCalculator(Calculator):
         """Write DeepH-E3 / MACE-H metadata files for a structure.
 
         Produces the six metadata files that the preprocessing pipeline
-        emits alongside ``hamiltonians.h5`` and ``overlaps.h5``:
+        emits alongside ``hamiltonians_pred.h5`` and ``overlaps.h5``:
 
         - ``info.json``          — ``{"isspinful": bool}``
         - ``lat.dat``            — real-space lattice, 3x3
@@ -622,6 +688,14 @@ class MACEHCalculator(Calculator):
         - ``element.dat``        — atomic numbers, one per atom
         - ``site_positions.dat`` — Cartesian positions, 3xN
         - ``orbital_types.dat``  — per-atom orbital angular momenta
+
+        Additionally writes ``hamiltonians_pred.h5`` containing one **empty**
+        HDF5 dataset per ``"[Rx, Ry, Rz, i, j]"`` edge key, exposing the
+        sparsity pattern of the predicted Hamiltonian without storing
+        any matrix elements.  This sparsity file is only written when
+        no ``hamiltonians_pred.h5`` already exists in *output_dir* — an
+        existing file (e.g. one written by :meth:`write_results` with
+        actual predictions) is left untouched.
 
         Lattice vectors and atomic coordinates are written as **columns**
         (i.e. transposed relative to ASE's row-wise cell convention),
@@ -674,13 +748,29 @@ class MACEHCalculator(Calculator):
                 orbs = self.dataset_info.orbital_types[idx]
                 f.write('\t'.join(str(int(l)) for l in orbs) + '\n')
 
+        # Sparsity-only hamiltonians_pred.h5: one empty dataset per edge key.
+        # Never clobber an existing file — it may already hold real data.
+        h5_path = os.path.join(output_dir, 'hamiltonians_pred.h5')
+        if not os.path.exists(h5_path):
+            graph = self._build_graph(atoms)
+            keys = {str(graph.edge_key[ie].tolist())
+                    for ie in range(graph.edge_key.shape[0])}
+            if self.dataset_info.spinful:
+                h5_dtype = (np.complex64 if self.np_dtype == np.float32
+                            else np.complex128)
+            else:
+                h5_dtype = self.np_dtype
+            with h5py.File(h5_path, 'w') as f:
+                for key in keys:
+                    f[key] = h5py.Empty(h5_dtype)
+
     def write_results(self, output_dir, atoms=None, metadata=True, data=True):
         """Write predicted Hamiltonian and/or structure metadata to disk.
 
         The destination folder mirrors the DeepH-E3 preprocessed-data
         layout: metadata files (``info.json``, ``lat.dat``, ``rlat.dat``,
         ``element.dat``, ``site_positions.dat``, ``orbital_types.dat``)
-        together with ``hamiltonians.h5`` holding the predicted matrix
+        together with ``hamiltonians_pred.h5`` holding the predicted matrix
         blocks.  Each dataset in the HDF5 file is keyed by the
         ``"[Rx, Ry, Rz, i, j]"`` string used everywhere else in the
         pipeline (1-based atom indices).
@@ -697,13 +787,19 @@ class MACEHCalculator(Calculator):
             :meth:`write_metadata`).
         data : bool
             If True, compute (or reuse) the predicted Hamiltonian and
-            write it to ``hamiltonians.h5``.
+            write it to ``hamiltonians_pred.h5``.
 
         Notes
         -----
-        Set ``metadata=False`` to write only ``hamiltonians.h5``, or
-        ``data=False`` to write only metadata.  Both flags False is an
-        error.
+        Set ``metadata=False`` to write only ``hamiltonians_pred.h5`` with
+        real predicted blocks, or ``data=False`` to write only metadata
+        — in that case ``hamiltonians_pred.h5`` is still produced but
+        contains empty datasets exposing just the sparsity pattern
+        (see :meth:`write_metadata`).  When both flags are True,
+        :meth:`write_metadata` runs first (and leaves any existing
+        ``hamiltonians_pred.h5`` alone), then the data branch overwrites
+        ``hamiltonians_pred.h5`` with the predicted matrix blocks. Both
+        flags False is an error.
         """
         if not (metadata or data):
             raise ValueError(
@@ -722,7 +818,7 @@ class MACEHCalculator(Calculator):
         if data:
             self.calculate(atoms)
             H_dict = self.results['hamiltonian']
-            h5_path = os.path.join(output_dir, 'hamiltonians.h5')
+            h5_path = os.path.join(output_dir, 'hamiltonians_pred.h5')
             with h5py.File(h5_path, 'w') as f:
                 for key, block in H_dict.items():
                     if isinstance(block, torch.Tensor):

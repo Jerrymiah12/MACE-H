@@ -64,6 +64,14 @@ class MACEHCalculator(Calculator):
     debug : bool
         If True, fill unpredicted matrix elements with 0 instead of
         raising an error.
+    num_threads : int or None
+        If given, calls :func:`torch.set_num_threads` to clamp the
+        number of CPU threads used by torch ops.  Unlike the
+        ``-n``/``OMP_NUM_THREADS`` clamp in ``deephe3-eval.py``, this
+        does **not** set the BLAS/OMP environment variables — those
+        must be set before ``torch`` is imported to take effect, so
+        clamp them in the user's launch script if BLAS-level threading
+        also needs to be limited.
     uncertainty_method : str or None
         Method used to estimate Hamiltonian uncertainty.  When set, the
         chosen estimator is evaluated in :meth:`calculate` and stored
@@ -89,12 +97,15 @@ class MACEHCalculator(Calculator):
 
     def __init__(self, model_dir, radius=None, device='cpu', dtype='float32',
                  debug=False, uncertainty_method=None, symmetrize=False,
-                 **kwargs):
+                 num_threads=None, **kwargs):
         super().__init__(**kwargs)
 
         self.model_device = device
         self.debug = debug
         self.symmetrize = symmetrize
+
+        if num_threads is not None:
+            torch.set_num_threads(int(num_threads))
 
         if uncertainty_method is not None \
                 and uncertainty_method not in self._UNCERTAINTY_METHODS:
@@ -689,13 +700,14 @@ class MACEHCalculator(Calculator):
         - ``site_positions.dat`` — Cartesian positions, 3xN
         - ``orbital_types.dat``  — per-atom orbital angular momenta
 
-        Additionally writes ``hamiltonians_pred.h5`` containing one **empty**
+        Additionally writes ``hamiltonians_pred.h5`` and
+        ``hamiltonians_uncertainty.h5``, each containing one **empty**
         HDF5 dataset per ``"[Rx, Ry, Rz, i, j]"`` edge key, exposing the
-        sparsity pattern of the predicted Hamiltonian without storing
-        any matrix elements.  This sparsity file is only written when
-        no ``hamiltonians_pred.h5`` already exists in *output_dir* — an
-        existing file (e.g. one written by :meth:`write_results` with
-        actual predictions) is left untouched.
+        sparsity pattern of the predicted Hamiltonian / uncertainty
+        without storing any matrix elements.  Each sparsity file is only
+        written when no file of that name already exists in *output_dir*
+        — an existing file (e.g. one written by :meth:`write_results`
+        with actual values) is left untouched.
 
         Lattice vectors and atomic coordinates are written as **columns**
         (i.e. transposed relative to ASE's row-wise cell convention),
@@ -748,10 +760,14 @@ class MACEHCalculator(Calculator):
                 orbs = self.dataset_info.orbital_types[idx]
                 f.write('\t'.join(str(int(l)) for l in orbs) + '\n')
 
-        # Sparsity-only hamiltonians_pred.h5: one empty dataset per edge key.
-        # Never clobber an existing file — it may already hold real data.
-        h5_path = os.path.join(output_dir, 'hamiltonians_pred.h5')
-        if not os.path.exists(h5_path):
+        # Sparsity-only HDF5 files: one empty dataset per edge key, for both
+        # the predicted Hamiltonian and its uncertainty.  Never clobber an
+        # existing file — it may already hold real data.
+        pred_path = os.path.join(output_dir, 'hamiltonians_pred.h5')
+        unc_path = os.path.join(output_dir, 'hamiltonians_uncertainty.h5')
+        need_pred = not os.path.exists(pred_path)
+        need_unc = not os.path.exists(unc_path)
+        if need_pred or need_unc:
             graph = self._build_graph(atoms)
             keys = {str(graph.edge_key[ie].tolist())
                     for ie in range(graph.edge_key.shape[0])}
@@ -760,18 +776,26 @@ class MACEHCalculator(Calculator):
                             else np.complex128)
             else:
                 h5_dtype = self.np_dtype
-            with h5py.File(h5_path, 'w') as f:
-                for key in keys:
-                    f[key] = h5py.Empty(h5_dtype)
+            if need_pred:
+                with h5py.File(pred_path, 'w') as f:
+                    for key in keys:
+                        f[key] = h5py.Empty(h5_dtype)
+            if need_unc:
+                # Uncertainty is real-valued even for spinful Hamiltonians.
+                with h5py.File(unc_path, 'w') as f:
+                    for key in keys:
+                        f[key] = h5py.Empty(self.np_dtype)
 
-    def write_results(self, output_dir, atoms=None, metadata=True, data=True):
-        """Write predicted Hamiltonian and/or structure metadata to disk.
+    def write_results(self, output_dir, atoms=None, metadata=True, data=True,
+                      uncertainty=False):
+        """Write predicted Hamiltonian, uncertainty and/or metadata to disk.
 
         The destination folder mirrors the DeepH-E3 preprocessed-data
         layout: metadata files (``info.json``, ``lat.dat``, ``rlat.dat``,
         ``element.dat``, ``site_positions.dat``, ``orbital_types.dat``)
         together with ``hamiltonians_pred.h5`` holding the predicted matrix
-        blocks.  Each dataset in the HDF5 file is keyed by the
+        blocks and ``hamiltonians_uncertainty.h5`` holding the per-block
+        uncertainty.  Each dataset in the HDF5 files is keyed by the
         ``"[Rx, Ry, Rz, i, j]"`` string used everywhere else in the
         pipeline (1-based atom indices).
 
@@ -788,22 +812,33 @@ class MACEHCalculator(Calculator):
         data : bool
             If True, compute (or reuse) the predicted Hamiltonian and
             write it to ``hamiltonians_pred.h5``.
+        uncertainty : bool
+            If True, compute (or reuse) the per-block uncertainty and
+            write it to ``hamiltonians_uncertainty.h5``.  Requires the
+            calculator to have been constructed with a non-None
+            ``uncertainty_method``.
 
         Notes
         -----
-        Set ``metadata=False`` to write only ``hamiltonians_pred.h5`` with
-        real predicted blocks, or ``data=False`` to write only metadata
-        — in that case ``hamiltonians_pred.h5`` is still produced but
-        contains empty datasets exposing just the sparsity pattern
-        (see :meth:`write_metadata`).  When both flags are True,
-        :meth:`write_metadata` runs first (and leaves any existing
-        ``hamiltonians_pred.h5`` alone), then the data branch overwrites
-        ``hamiltonians_pred.h5`` with the predicted matrix blocks. Both
-        flags False is an error.
+        Set ``metadata=False`` to write only the data / uncertainty files
+        with real values, or ``data=False`` / ``uncertainty=False`` to skip
+        those.  When ``metadata=True`` but a value file is skipped, that
+        file is still produced by :meth:`write_metadata` but contains empty
+        datasets exposing just the sparsity pattern.  When both metadata and
+        a value flag are True, :meth:`write_metadata` runs first (and leaves
+        any existing files alone), then the value branch overwrites the
+        relevant ``.h5`` file with real blocks.  All three flags False is an
+        error.
         """
-        if not (metadata or data):
+        if not (metadata or data or uncertainty):
             raise ValueError(
-                "Nothing to write: set metadata=True and/or data=True."
+                "Nothing to write: set metadata, data and/or uncertainty "
+                "to True."
+            )
+        if uncertainty and self.uncertainty_method is None:
+            raise ValueError(
+                "uncertainty=True requires the calculator to be constructed "
+                "with a non-None uncertainty_method."
             )
         if atoms is None:
             if self.atoms is None:
@@ -815,12 +850,25 @@ class MACEHCalculator(Calculator):
         if metadata:
             self.write_metadata(output_dir, atoms=atoms)
 
-        if data:
+        # A single calculate() populates both the Hamiltonian and (when an
+        # uncertainty_method is set) the uncertainty in self.results.
+        if data or uncertainty:
             self.calculate(atoms)
+
+        if data:
             H_dict = self.results['hamiltonian']
             h5_path = os.path.join(output_dir, 'hamiltonians_pred.h5')
             with h5py.File(h5_path, 'w') as f:
                 for key, block in H_dict.items():
+                    if isinstance(block, torch.Tensor):
+                        block = block.detach().cpu().numpy()
+                    f[key] = np.asarray(block)
+
+        if uncertainty:
+            unc_dict = self.results['hamiltonian_uncertainty']
+            h5_path = os.path.join(output_dir, 'hamiltonians_uncertainty.h5')
+            with h5py.File(h5_path, 'w') as f:
+                for key, block in unc_dict.items():
                     if isinstance(block, torch.Tensor):
                         block = block.detach().cpu().numpy()
                     f[key] = np.asarray(block)

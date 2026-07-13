@@ -390,5 +390,6 @@ def get_graph(cart_coords, frac_coords, numbers, stru_id, r, max_num_nbr, edge_A
                             **kwargs)
     else:
         data = Data(x=numbers, edge_index=edge_idx, edge_attr=edge_fea, stru_id=stru_id,
-                    pos=cart_coords.type(default_dtype_torch), lattice=lattice.unsqueeze(0), **kwargs)
+                    pos=cart_coords.type(default_dtype_torch), lattice=lattice.unsqueeze(0),
+                    edge_key=edge_key, **kwargs)
     return data

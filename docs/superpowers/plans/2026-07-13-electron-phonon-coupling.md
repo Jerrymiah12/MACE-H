@@ -1,23 +1,23 @@
-# Electron-Phonon Coupling Implementation Plan
+# Cartesian AO Electron-Phonon Coupling Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Compute electron-phonon coupling matrix elements g_mnν(k,q) from finite-difference first derivatives of the MACE-H-predicted real-space Hamiltonian, saved to a per-structure `epc_pred.h5`.
+**Goal:** Compute the Cartesian atomic-orbital electron-phonon coupling g_ijκα(k,q) = [∂H(k,q)/∂τ_κα]_ij from finite-difference first derivatives of the MACE-H-predicted real-space Hamiltonian, saved to a per-structure `epc_cartesian_pred.h5`. Phonon-mode contraction and band-basis transformation are explicitly postponed (no phonopy, no diagonalization, no overlaps.h5).
 
-**Architecture:** New package `maceh/epc/` with pure-function stages: supercell/index math (`supercell.py`), finite-difference derivatives on a fixed graph (`derivative.py`), Bloch sums + generalized eigenproblem (`electron.py`), phonopy interface (`phonon.py`), g contraction + HDF5 writer (`assemble.py`), and an orchestrator (`run.py`) driven by a new CLI `deephe3-epc.py` and `EPCConfig`. Spec: `docs/superpowers/specs/2026-07-13-electron-phonon-coupling-design.md`.
+**Architecture:** New package `maceh/epc/` with pure-function stages: supercell/index math (`supercell.py`), finite-difference derivatives on a fixed graph (`derivative.py`), double Fourier transform + HDF5 writer (`assemble.py`), and an orchestrator (`run.py`) driven by a new CLI `deephe3-epc.py` and `EPCConfig`. Spec: `docs/superpowers/specs/2026-07-13-electron-phonon-coupling-design.md`.
 
-**Tech Stack:** PyTorch + torch_geometric + e3nn (existing model stack), numpy, scipy (`eigh`), h5py, phonopy (new dependency).
+**Tech Stack:** PyTorch + torch_geometric + e3nn (existing model stack), numpy, h5py.
 
 ## Global Constraints
 
-- Python for all commands: `/opt/anaconda3/envs/DeepH/bin/python` (has torch 2.x, torch_geometric, e3nn, scipy, h5py). Task 1 installs `phonopy` and `pytest` into it.
+- Python for all commands: `/opt/anaconda3/envs/DeepH/bin/python` (has torch 2.x, torch_geometric, e3nn, scipy, h5py). Task 1 installs `pytest` into it.
 - Run pytest from the repo root `/Users/jb/MACE-H` so `maceh` is importable: `/opt/anaconda3/envs/DeepH/bin/python -m pytest tests/... -v`
-- Units everywhere: energies eV, lengths Å, masses amu; g comes out in eV.
+- Units: energies eV, lengths Å; g comes out in eV/Å. k and q are fractional coordinates.
 - H5 hopping keys are `str([Rx, Ry, Rz, i, j])` with **1-based** i, j; all in-memory atom indices are **0-based**.
-- Bloch gauge is the cell-phase convention: `M(k) = Σ_R exp(2πi k·R) M_R` (matches the existing Julia/Band.py postprocessing).
+- Bloch gauge is the cell-phase convention: `g_ijκα(k,q) = Σ_p exp(2πi q·p) Σ_R exp(2πi k·R) [∂H(p,R)]_ij` (matches the existing Julia/Band.py postprocessing).
 - The training pipeline and model code are unchanged. The only edit outside `maceh/epc/`, `maceh/parse_configs.py`, `maceh/default_configs/`, and top-level script/docs is a one-line addition in `maceh/graph.py` (attach `edge_key` to the `data_folder=None` Data).
 - Supercell atom ordering is cell-major: supercell index `= cell_lin(p) * n_uc_atoms + i` with `cell_lin(p) = (p1*n2 + p2)*n3 + p3`; home cell p=(0,0,0) atoms come first.
-- `import numpy as np`, `import torch` conventions as in the existing codebase; comment style matches the repo (sparse, explanatory only where needed).
+- Comment style matches the repo (sparse, `r''' ... '''` docstrings where used).
 
 ---
 
@@ -30,7 +30,7 @@
 
 **Interfaces:**
 - Consumes: nothing from other tasks.
-- Produces (used by Tasks 2, 3, 8):
+- Produces (used by Tasks 2, 3, 4, 5):
   - `Structure` namedtuple: `positions` np.ndarray (N,3) cartesian Å float64, `lattice` np.ndarray (3,3) **rows are lattice vectors**, `numbers` np.ndarray (N,) int atomic numbers.
   - `load_structure(structure_dir: str) -> Structure`
   - `class SupercellMap(n_grid: tuple[int,int,int], n_uc_atoms: int)` with `.n_grid`, `.n_uc_atoms`, `.cells` (list of 3-tuples, cell-major order), `.n_cells`, `.cell_lin(p) -> int`, `.sc_index(i, p) -> int`, `.uc_of(sc_i) -> (i, p_tuple)`
@@ -38,13 +38,13 @@
   - `fold_key(key: list[int], smap: SupercellMap) -> (p: tuple, R: tuple, i: int, j: int)` — key is `[Rx,Ry,Rz,I,J]` 1-based supercell; returns p reduced mod n_grid, R exact in unit-cell lattice units, i/j 0-based unit-cell atoms.
   - `uniform_grid(n_grid) -> np.ndarray (n1*n2*n3, 3)` fractional coordinates, cell-major order.
 
-- [ ] **Step 1: Install test/runtime deps into the DeepH env**
+- [ ] **Step 1: Install test deps into the DeepH env**
 
 ```bash
-/opt/anaconda3/envs/DeepH/bin/pip install pytest phonopy
+/opt/anaconda3/envs/DeepH/bin/pip install pytest
 ```
 
-Expected: both install without error (phonopy pulls its own pure-python deps).
+Expected: installs without error.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -230,7 +230,7 @@ git commit -m "feat(epc): supercell construction and index folding for EPC deriv
 
 **Interfaces:**
 - Consumes: `Structure` from Task 1; `maceh.graph.get_graph`, `maceh.graph.get_edge_fea` (existing).
-- Produces (used by Task 8):
+- Produces (used by Task 6):
   - `build_supercell_graph(struct: Structure, radius: float, default_dtype_torch) -> torch_geometric.data.Data` with fields `x` (atomic numbers, int64), `edge_index`, `edge_attr` = `[dist, dx, dy, dz]`, `edge_key` (`[Rx,Ry,Rz,i,j]` 1-based), `pos`, `lattice` (shape (1,3,3)). Raises `AssertionError` if the recomputed `edge_attr` does not match graph construction (the spec's startup self-check).
 
 - [ ] **Step 1: Write the failing test**
@@ -352,7 +352,7 @@ git commit -m "feat(epc): radius-based supercell graph with edge_attr recomputat
 
 **Interfaces:**
 - Consumes: `SupercellMap`, `fold_key` from Task 1.
-- Produces (used by Tasks 6, 8):
+- Produces (used by Tasks 4, 6):
   - `@dataclass DerivativeData`: fields `n_grid: tuple`, `n_uc_atoms: int`, `delta: float`, `norb_cumsum: np.ndarray` ((n_uc_atoms+1,)), `blocks: dict` mapping `(kappa, alpha)` → `{(p_tuple, R_tuple): np.ndarray (norb_tot, norb_tot)}`; property `norb_tot`.
   - `finite_difference(predict_fn, positions0: torch.Tensor, smap, norb_cumsum, delta, atom_indices=None, grad_threshold=1e-10) -> DerivativeData` where `predict_fn(positions) -> {str([Rx,Ry,Rz,I,J]): np.ndarray}` predicts supercell hopping blocks at given positions on a **fixed** graph.
   - `acoustic_sum_rule(deriv: DerivativeData) -> float` — max |Σ_{κ,p} dH| over α and R.
@@ -366,7 +366,7 @@ import numpy as np
 import torch
 import pytest
 
-from maceh.epc.supercell import SupercellMap
+from maceh.epc.supercell import SupercellMap, fold_key
 from maceh.epc.derivative import DerivativeData, finite_difference, acoustic_sum_rule
 
 A = 3.0  # unit-cell lattice constant along x
@@ -392,7 +392,7 @@ def predict_fn(positions):
 
 def analytic_deriv(pos, key, kappa_sc, alpha):
     # d|v|/d tau_{kappa,alpha} where v = r_J + R'.L - r_I; displacing a supercell
-    # atom moves it in ALL supercell images simultaneously
+    # atom moves only that atom (its supercell periodic images are other sc atoms)
     v = edge_vec(pos, key)
     n = np.linalg.norm(v)
     d = 0.0
@@ -416,7 +416,6 @@ def test_finite_difference_matches_analytic():
         found = deriv.blocks[(0, alpha)]
         for key in KEYS:
             expected = analytic_deriv(pos_np, key, kappa_sc=0, alpha=alpha)
-            from maceh.epc.supercell import fold_key
             p, R, i, j = fold_key(key, smap)
             got = found.get((p, R), np.zeros((1, 1)))[i, j]
             assert got == pytest.approx(expected, abs=1e-6), (key, alpha)
@@ -439,7 +438,7 @@ def test_acoustic_sum_rule_zero_for_translation_invariant_model():
     assert acoustic_sum_rule(deriv) < 1e-6
 ```
 
-Note: with 1 atom per unit cell, displacing uc atom 0 moves only supercell atom 0 (index 0 = home cell); the atom in cell (1,0,0) is supercell atom 1 and stays put. `analytic_deriv` handles edges where both endpoints are atom 0 (contributions cancel).
+Note: with 1 atom per unit cell in a 2×1×1 supercell, displacing uc atom 0 moves only supercell atom 0 (index 0 = home cell); the atom in cell (1,0,0) is supercell atom 1 and stays put. `analytic_deriv` handles edges where both endpoints are atom 0 (contributions cancel).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -530,421 +529,87 @@ git commit -m "feat(epc): finite-difference Hamiltonian derivatives with fold-ba
 
 ---
 
-### Task 4: Electronic structure (`maceh/epc/electron.py`)
-
-**Files:**
-- Create: `maceh/epc/electron.py`
-- Test: `tests/test_electron.py`
-
-**Interfaces:**
-- Consumes: `maceh.graph.load_orbital_types` (existing).
-- Produces (used by Tasks 6, 8):
-  - `load_orbital_slices(orbital_types_path, spinful=False) -> (norb_list: list[int], norb_cumsum: np.ndarray)` (counts doubled when spinful)
-  - `load_blocks_h5(path, force_hermiticity=True) -> {str_key: np.ndarray}`
-  - `blocks_to_dense(blocks, norb_cumsum, spin_expand=False) -> {R_tuple: np.ndarray (norb_tot, norb_tot) complex128}` — `spin_expand=True` block-diagonally doubles each block (for spin-independent overlaps in spinful mode)
-  - `bloch_sum(dense_by_R, k_frac) -> np.ndarray` — `Σ_R exp(2πi k·R) M_R`
-  - `class ElectronSolver(H_by_R, S_by_R)` with `.solve(k_frac) -> (eps: np.ndarray, C: np.ndarray)` (generalized `scipy.linalg.eigh`, cached per k mod 1)
-  - `band_window(solver, k_list, fermi_energy, half_width) -> (b_lo: int, b_hi: int)` — global band index range covering all states inside the window at any listed k; raises AssertionError if empty
-
-- [ ] **Step 1: Write the failing tests**
-
-Create `tests/test_electron.py` (1-orbital 1D chain, ε(k) = −2cos(2πk)):
-
-```python
-import json
-
-import numpy as np
-import h5py
-import pytest
-
-from maceh.epc.electron import (load_orbital_slices, load_blocks_h5, blocks_to_dense,
-                                bloch_sum, ElectronSolver, band_window)
-
-
-def chain_blocks():
-    return {'[0, 0, 0, 1, 1]': np.array([[0.0]]),
-            '[1, 0, 0, 1, 1]': np.array([[-1.0]]),
-            '[-1, 0, 0, 1, 1]': np.array([[-1.0]])}
-
-
-def overlap_blocks():
-    return {'[0, 0, 0, 1, 1]': np.array([[1.0]]),
-            '[1, 0, 0, 1, 1]': np.array([[0.0]]),
-            '[-1, 0, 0, 1, 1]': np.array([[0.0]])}
-
-
-def test_load_orbital_slices(tmp_path):
-    # two atoms: s+p (1+3 orbitals) and s (1 orbital)
-    (tmp_path / 'orbital_types.dat').write_text('0 1\n0\n')
-    norb, cumsum = load_orbital_slices(str(tmp_path / 'orbital_types.dat'))
-    assert norb == [4, 1]
-    assert list(cumsum) == [0, 4, 5]
-    norb2, cumsum2 = load_orbital_slices(str(tmp_path / 'orbital_types.dat'), spinful=True)
-    assert norb2 == [8, 2]
-
-
-def test_load_blocks_h5_hermitizes(tmp_path):
-    path = str(tmp_path / 'h.h5')
-    with h5py.File(path, 'w') as f:
-        f['[0, 0, 0, 1, 1]'] = np.array([[1.0]])
-        f['[1, 0, 0, 1, 1]'] = np.array([[-1.2]])
-        f['[-1, 0, 0, 1, 1]'] = np.array([[-0.8]])
-    blocks = load_blocks_h5(path)
-    assert blocks['[1, 0, 0, 1, 1]'][0, 0] == pytest.approx(-1.0)
-    assert blocks['[-1, 0, 0, 1, 1]'][0, 0] == pytest.approx(-1.0)
-
-
-def test_bloch_sum_and_solver():
-    H = blocks_to_dense(chain_blocks(), np.array([0, 1]))
-    S = blocks_to_dense(overlap_blocks(), np.array([0, 1]))
-    assert bloch_sum(H, [0.0, 0.0, 0.0])[0, 0] == pytest.approx(-2.0)
-    assert bloch_sum(H, [0.5, 0.0, 0.0])[0, 0] == pytest.approx(2.0)
-    solver = ElectronSolver(H, S)
-    eps, C = solver.solve([0.25, 0.0, 0.0])
-    assert eps[0] == pytest.approx(-2.0 * np.cos(2 * np.pi * 0.25), abs=1e-12)
-    assert abs(C[0, 0]) == pytest.approx(1.0)
-    # cache respects periodicity in k
-    eps2, _ = solver.solve([1.25, 0.0, 0.0])
-    assert eps2[0] == eps[0]
-
-
-def test_spin_expand():
-    S = blocks_to_dense(overlap_blocks(), np.array([0, 2]), spin_expand=True)
-    assert S[(0, 0, 0)].shape == (2, 2)
-    assert np.allclose(S[(0, 0, 0)], np.eye(2))
-
-
-def test_band_window():
-    H = blocks_to_dense(chain_blocks(), np.array([0, 1]))
-    S = blocks_to_dense(overlap_blocks(), np.array([0, 1]))
-    solver = ElectronSolver(H, S)
-    ks = [[k, 0, 0] for k in np.linspace(0, 0.5, 6)]
-    b_lo, b_hi = band_window(solver, ks, fermi_energy=0.0, half_width=3.0)
-    assert (b_lo, b_hi) == (0, 1)
-    with pytest.raises(AssertionError):
-        band_window(solver, ks, fermi_energy=100.0, half_width=1.0)
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `/opt/anaconda3/envs/DeepH/bin/python -m pytest tests/test_electron.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'maceh.epc.electron'`
-
-- [ ] **Step 3: Implement `maceh/epc/electron.py`**
-
-```python
-import json
-
-import numpy as np
-import h5py
-from scipy.linalg import eigh
-
-from ..graph import load_orbital_types
-
-
-def load_orbital_slices(orbital_types_path, spinful=False):
-    norb_list = load_orbital_types(orbital_types_path)
-    if spinful:
-        norb_list = [2 * n for n in norb_list]
-    return norb_list, np.concatenate([[0], np.cumsum(norb_list)])
-
-
-def load_blocks_h5(path, force_hermiticity=True):
-    with h5py.File(path, 'r') as f:
-        blocks = {k: np.array(v) for k, v in f.items()}
-    if force_hermiticity:
-        out = {}
-        for k, v in blocks.items():
-            key = json.loads(k)
-            k_adj = str([-key[0], -key[1], -key[2], key[4], key[3]])
-            out[k] = (v + blocks[k_adj].conj().T) / 2.0
-        blocks = out
-    return blocks
-
-
-def blocks_to_dense(blocks, norb_cumsum, spin_expand=False):
-    norb_cumsum = np.asarray(norb_cumsum)
-    norb_tot = int(norb_cumsum[-1])
-    dense_by_R = {}
-    for key_str, b in blocks.items():
-        key = json.loads(key_str)
-        R, i, j = tuple(key[:3]), key[3] - 1, key[4] - 1
-        if spin_expand:
-            b = np.block([[b, np.zeros_like(b)], [np.zeros_like(b), b]])
-        if R not in dense_by_R:
-            dense_by_R[R] = np.zeros((norb_tot, norb_tot), dtype=np.complex128)
-        dense_by_R[R][norb_cumsum[i]:norb_cumsum[i + 1],
-                      norb_cumsum[j]:norb_cumsum[j + 1]] = b
-    return dense_by_R
-
-
-def bloch_sum(dense_by_R, k_frac):
-    r''' M(k) = sum_R exp(2 pi i k.R) M_R (cell-phase gauge, matching the Julia
-    band-structure postprocessing) '''
-    k = np.asarray(k_frac, dtype=np.float64)
-    out = 0
-    for R, m in dense_by_R.items():
-        out = out + np.exp(2j * np.pi * (k @ np.asarray(R, dtype=np.float64))) * m
-    return out
-
-
-class ElectronSolver:
-
-    def __init__(self, H_by_R, S_by_R):
-        self.H_by_R = H_by_R
-        self.S_by_R = S_by_R
-        self._cache = {}
-
-    def solve(self, k_frac):
-        key = tuple(np.round(np.asarray(k_frac, dtype=np.float64) % 1.0, 8))
-        if key not in self._cache:
-            Hk = bloch_sum(self.H_by_R, k_frac)
-            Sk = bloch_sum(self.S_by_R, k_frac)
-            Hk = (Hk + Hk.conj().T) / 2.0
-            Sk = (Sk + Sk.conj().T) / 2.0
-            self._cache[key] = eigh(Hk, Sk)
-        return self._cache[key]
-
-
-def band_window(solver, k_list, fermi_energy, half_width):
-    b_lo, b_hi = None, None
-    for k in k_list:
-        eps, _ = solver.solve(k)
-        idx = np.where(np.abs(eps - fermi_energy) <= half_width)[0]
-        if idx.size == 0:
-            continue
-        b_lo = int(idx[0]) if b_lo is None else min(b_lo, int(idx[0]))
-        b_hi = int(idx[-1]) + 1 if b_hi is None else max(b_hi, int(idx[-1]) + 1)
-    assert b_lo is not None, 'no electronic states inside the energy window'
-    return b_lo, b_hi
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `/opt/anaconda3/envs/DeepH/bin/python -m pytest tests/test_electron.py -v`
-Expected: 5 PASSED
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add maceh/epc/electron.py tests/test_electron.py
-git commit -m "feat(epc): Bloch sums, generalized eigensolver and Fermi-window selection"
-```
-
----
-
-### Task 5: Phonon interface (`maceh/epc/phonon.py`)
-
-**Files:**
-- Create: `maceh/epc/phonon.py`
-- Test: `tests/test_phonon.py`
-
-**Interfaces:**
-- Consumes: phonopy (installed in Task 1).
-- Produces (used by Tasks 6, 8):
-  - `THZ_TO_EV = 4.135667696e-3`
-  - `class PhononData(phonopy_obj)` with `.natoms`, `.masses` (np (N,), amu), `.frac_coords` (np (N,3)), `.modes(q_frac) -> (omega_ev: np (3N,), evec: np (N, 3, 3N) complex)`; classmethod `.from_directory(phonopy_dir)` loading `phonopy.yaml` (+ `FORCE_CONSTANTS` if present). Negative `omega_ev` marks imaginary modes. Eigenvectors are converted from phonopy's atom-position phase convention to the cell-phase gauge: `e_cell(κ) = e_phonopy(κ) · exp(2πi q·τ_frac,κ)`.
-
-- [ ] **Step 1: Write the failing tests**
-
-Create `tests/test_phonon.py`. A 1-atom cell with diagonal force constants `Φ = c·I` and identity supercell gives three degenerate modes with `ν_THz = VaspToTHz · sqrt(c/m)`; the gauge conversion is tested by placing the atom off-origin:
-
-```python
-import numpy as np
-import pytest
-
-phonopy = pytest.importorskip('phonopy')
-from phonopy import Phonopy
-from phonopy.structure.atoms import PhonopyAtoms
-from phonopy.units import VaspToTHz
-
-from maceh.epc.phonon import PhononData, THZ_TO_EV
-
-
-def make_phonon(scaled_position):
-    cell = PhonopyAtoms(symbols=['Au'], cell=4.0 * np.eye(3),
-                        scaled_positions=[scaled_position])
-    ph = Phonopy(cell, supercell_matrix=np.eye(3, dtype=int))
-    c = 5.0  # eV / Angstrom^2
-    ph.force_constants = c * np.eye(3)[None, None, :, :]
-    return ph, c
-
-
-def test_frequencies():
-    ph, c = make_phonon([0.0, 0.0, 0.0])
-    data = PhononData(ph)
-    assert data.natoms == 1
-    mass = data.masses[0]
-    omega, evec = data.modes([0.0, 0.0, 0.0])
-    expected = VaspToTHz * np.sqrt(c / mass) * THZ_TO_EV
-    assert np.allclose(omega, expected, rtol=1e-6)
-    assert evec.shape == (1, 3, 3)
-
-
-def test_gauge_conversion():
-    # same dynamics, atom moved off-origin: cell-phase eigenvector must carry
-    # the extra factor exp(2 pi i q . tau)
-    q = [0.5, 0.0, 0.0]
-    tau = [0.25, 0.0, 0.0]
-    ph, _ = make_phonon(tau)
-    data = PhononData(ph)
-    _, evec_cell = data.modes(q)
-    freqs, evec_raw = ph.get_frequencies_with_eigenvectors(q)
-    expected = evec_raw.reshape(1, 3, 3) * np.exp(2j * np.pi * np.dot(tau, q))
-    assert np.allclose(evec_cell, expected)
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `/opt/anaconda3/envs/DeepH/bin/python -m pytest tests/test_phonon.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'maceh.epc.phonon'`
-
-- [ ] **Step 3: Implement `maceh/epc/phonon.py`**
-
-```python
-import os
-
-import numpy as np
-
-THZ_TO_EV = 4.135667696e-3  # h * 1 THz in eV
-
-
-class PhononData:
-    r''' phonon frequencies and eigenvectors from phonopy, converted to the
-    cell-phase gauge used by the electronic Bloch sums '''
-
-    def __init__(self, phonopy_obj):
-        self._ph = phonopy_obj
-        prim = phonopy_obj.primitive
-        self.masses = np.asarray(prim.masses, dtype=np.float64)  # amu
-        self.frac_coords = np.asarray(prim.scaled_positions, dtype=np.float64)
-        self.natoms = len(self.masses)
-
-    @classmethod
-    def from_directory(cls, phonopy_dir):
-        import phonopy
-        kwargs = {}
-        fc_path = os.path.join(phonopy_dir, 'FORCE_CONSTANTS')
-        if os.path.isfile(fc_path):
-            kwargs['force_constants_filename'] = fc_path
-        return cls(phonopy.load(os.path.join(phonopy_dir, 'phonopy.yaml'), **kwargs))
-
-    def modes(self, q_frac):
-        r''' returns (omega_ev (3N,), evec (N, 3, 3N) complex) at fractional q.
-        Negative omega marks imaginary (soft) modes. Phonopy's dynamical matrix
-        uses atom-position phases exp(iq.r(l kappa)); the electronic side uses
-        cell phases exp(iq.p), so eigenvectors are converted with
-        e_cell(kappa) = e_phonopy(kappa) * exp(2 pi i q . tau_kappa). '''
-        q = np.asarray(q_frac, dtype=np.float64)
-        freqs_thz, evecs = self._ph.get_frequencies_with_eigenvectors(q)
-        omega_ev = np.asarray(freqs_thz) * THZ_TO_EV
-        phase = np.exp(2j * np.pi * (self.frac_coords @ q))
-        evec = evecs.reshape(self.natoms, 3, 3 * self.natoms) * phase[:, None, None]
-        return omega_ev, evec
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `/opt/anaconda3/envs/DeepH/bin/python -m pytest tests/test_phonon.py -v`
-Expected: 2 PASSED. If `test_gauge_conversion` fails on the phase factor sign/presence, check the installed phonopy's dynamical-matrix convention (`phonopy/harmonic/dynamical_matrix.py`) and adjust the conversion so that `e_cell = e_phonopy * exp(+2πi q·τ)` holds for the *atom-position* convention; if the installed phonopy already uses cell phases (some builds expose `dynamical_matrix_decimals`/'auto' conventions), the conversion factor must be dropped — update both code and test to the verified convention and record it in the docstring.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add maceh/epc/phonon.py tests/test_phonon.py
-git commit -m "feat(epc): phonopy interface with cell-phase gauge conversion"
-```
-
----
-
-### Task 6: EPC assembly and output (`maceh/epc/assemble.py`)
+### Task 4: Fourier transform and output (`maceh/epc/assemble.py`)
 
 **Files:**
 - Create: `maceh/epc/assemble.py`
 - Test: `tests/test_assemble.py`
 
 **Interfaces:**
-- Consumes: `DerivativeData` (Task 3), `ElectronSolver`, `bloch_sum`, `band_window` (Task 4), a phonon object duck-typing `PhononData` (Task 5: `.natoms`, `.masses`, `.modes(q)`).
-- Produces (used by Task 8):
-  - `HBAR_JS`, `AMU_KG`, `EV_J` constants; `zero_point_length(mass_amu, omega_ev) -> float` (Å)
-  - `compute_epc(deriv, solver, phonons, kpts, qpts, fermi_energy, energy_window, omega_tol=1e-5) -> dict` with keys `g` (complex128, (nq, 3N, nk, nb, nb)), `omega_q` ((nq, 3N)), `soft_mode_mask` (bool (nq, 3N)), `eps_k` ((nk, nb)), `eps_kq` ((nq, nk, nb)), `band_range` ((2,) = [b_lo, b_hi)), `kpts`, `qpts`
-  - `write_epc_h5(path, results: dict, attrs: dict)`
+- Consumes: `DerivativeData` (Task 3), `Structure` (Task 1).
+- Produces (used by Task 6):
+  - `compute_epc_cartesian(deriv: DerivativeData, kpts, qpts) -> dict` with keys:
+    - `g` complex128 `(nk, nq, n_displaced, 3, norb_tot, norb_tot)` — `g_ijκα(k,q) = Σ_p e^{2πi q·p} Σ_R e^{2πi k·R} [∂H(p,R)]_ij`
+    - `atom_indices` np int `(n_displaced,)` — sorted 0-based displaced atoms (derived from `deriv.blocks` keys)
+    - `kpoints` `(nk, 3)`, `qpoints` `(nq, 3)` fractional
+  - `write_epc_cartesian_h5(path, results: dict, struct: Structure, deriv: DerivativeData, attrs: dict)` — writes the spec's `epc_cartesian_pred.h5` layout: datasets `g_real`, `g_imag`, `kpoints`, `qpoints`, `atomic_numbers`, `atom_indices`, `cartesian_directions` (bytes 'x','y','z'), `orbital_indices` ((norb_tot,) atom owning each AO), `lattice`, `positions`, `supercell_matrix` (diag(n_grid)), `finite_difference_delta`; file attrs from `attrs` (must include `units`).
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `tests/test_assemble.py` (1 atom, 1 orbital, S = 1, flat band at 0; dH constant per direction; stub phonons with ω = 1 eV and cartesian eigenvectors — every factor of g is then hand-computable):
+Create `tests/test_assemble.py` (hand-computable phase sums: 1 atom, 1 orbital, two real-space derivative entries):
 
 ```python
 import numpy as np
 import h5py
 import pytest
 
+from maceh.epc.supercell import Structure
 from maceh.epc.derivative import DerivativeData
-from maceh.epc.electron import ElectronSolver
-from maceh.epc.assemble import (compute_epc, write_epc_h5, zero_point_length,
-                                HBAR_JS, AMU_KG, EV_J)
+from maceh.epc.assemble import compute_epc_cartesian, write_epc_cartesian_h5
 
 
-class StubPhonons:
-    natoms = 1
-    masses = np.array([2.0])  # amu
-
-    def __init__(self, omega=1.0):
-        self.omega = omega
-
-    def modes(self, q_frac):
-        evec = np.zeros((1, 3, 3), dtype=complex)
-        evec[0, :, :] = np.eye(3)  # mode nu polarized along axis nu
-        return np.full(3, self.omega), evec
+def make_deriv():
+    # blocks only for (kappa=0, alpha=0); alpha=1,2 empty
+    blocks = {(0, 0): {((0, 0, 0), (0, 0, 0)): np.array([[1.0]]),
+                       ((1, 0, 0), (2, 0, 0)): np.array([[0.5]])},
+              (0, 1): {}, (0, 2): {}}
+    return DerivativeData(n_grid=(2, 1, 1), n_uc_atoms=1, delta=0.01,
+                          norb_cumsum=np.array([0, 1]), blocks=blocks)
 
 
-def make_inputs():
-    solver = ElectronSolver({(0, 0, 0): np.array([[0.0]], dtype=complex)},
-                            {(0, 0, 0): np.array([[1.0]], dtype=complex)})
-    d = [1.0, 2.0, 3.0]
-    blocks = {(0, a): {((0, 0, 0), (0, 0, 0)): np.array([[d[a]]])} for a in range(3)}
-    deriv = DerivativeData(n_grid=(1, 1, 1), n_uc_atoms=1, delta=0.01,
-                           norb_cumsum=np.array([0, 1]), blocks=blocks)
-    return deriv, solver, d
+def test_compute_epc_cartesian_phases():
+    deriv = make_deriv()
+    kpts = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
+    qpts = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
+    res = compute_epc_cartesian(deriv, kpts, qpts)
+    g = res['g']
+    assert g.shape == (2, 2, 1, 3, 1, 1)
+    assert np.array_equal(res['atom_indices'], [0])
+    # k=0, q=0: 1 + 0.5
+    assert g[0, 0, 0, 0, 0, 0] == pytest.approx(1.5)
+    # k=0, q=(1/2,0,0): 1 + 0.5 * exp(2pi i * 0.5 * 1) = 1 - 0.5
+    assert g[0, 1, 0, 0, 0, 0] == pytest.approx(0.5)
+    # k=(1/2,0,0), q=0: 1 + 0.5 * exp(2pi i * 0.5 * 2) = 1.5
+    assert g[1, 0, 0, 0, 0, 0] == pytest.approx(1.5)
+    # k=(1/2,0,0), q=(1/2,0,0): 1 + 0.5 * (-1) * (1) = 0.5
+    assert g[1, 1, 0, 0, 0, 0] == pytest.approx(0.5)
+    # untouched directions are zero
+    assert np.all(g[:, :, :, 1:, :, :] == 0)
 
 
-def test_zero_point_length():
-    l = zero_point_length(2.0, 1.0)
-    expected = HBAR_JS / np.sqrt(2.0 * 2.0 * AMU_KG * 1.0 * EV_J) * 1e10
-    assert l == pytest.approx(expected)
-    assert 0.01 < l < 1.0  # sanity: sub-Angstrom zero-point length
-
-
-def test_compute_epc_single_site():
-    deriv, solver, d = make_inputs()
-    res = compute_epc(deriv, solver, StubPhonons(), kpts=[[0, 0, 0]], qpts=[[0, 0, 0]],
-                      fermi_energy=0.0, energy_window=1.0)
-    assert res['g'].shape == (1, 3, 1, 1, 1)
-    l = zero_point_length(2.0, 1.0)
-    for nu in range(3):
-        assert res['g'][0, nu, 0, 0, 0] == pytest.approx(l * d[nu])
-    assert res['band_range'].tolist() == [0, 1]
-    assert not res['soft_mode_mask'].any()
-    assert res['eps_k'][0, 0] == pytest.approx(0.0)
-
-
-def test_soft_modes_are_zeroed():
-    deriv, solver, _ = make_inputs()
-    res = compute_epc(deriv, solver, StubPhonons(omega=0.0), kpts=[[0, 0, 0]],
-                      qpts=[[0, 0, 0]], fermi_energy=0.0, energy_window=1.0)
-    assert res['soft_mode_mask'].all()
-    assert np.all(res['g'] == 0)
-
-
-def test_write_epc_h5(tmp_path):
-    deriv, solver, _ = make_inputs()
-    res = compute_epc(deriv, solver, StubPhonons(), kpts=[[0, 0, 0]], qpts=[[0, 0, 0]],
-                      fermi_energy=0.0, energy_window=1.0)
-    path = str(tmp_path / 'epc_pred.h5')
-    write_epc_h5(path, res, {'fermi_energy': 0.0, 'delta': 0.01})
+def test_write_epc_cartesian_h5(tmp_path):
+    deriv = make_deriv()
+    struct = Structure(positions=np.array([[0.0, 0.0, 0.0]]),
+                       lattice=3.0 * np.eye(3),
+                       numbers=np.array([79]))
+    kpts = np.array([[0.0, 0.0, 0.0]])
+    qpts = np.array([[0.0, 0.0, 0.0]])
+    res = compute_epc_cartesian(deriv, kpts, qpts)
+    path = str(tmp_path / 'epc_cartesian_pred.h5')
+    write_epc_cartesian_h5(path, res, struct, deriv,
+                           {'units': 'g in eV/Angstrom', 'spinful': False})
     with h5py.File(path, 'r') as f:
-        assert f['g'].shape == (1, 3, 1, 1, 1)
-        assert f.attrs['fermi_energy'] == 0.0
+        assert f['g_real'].shape == (1, 1, 1, 3, 1, 1)
+        assert f['g_imag'].shape == (1, 1, 1, 3, 1, 1)
+        assert f['g_real'][0, 0, 0, 0, 0, 0] == pytest.approx(1.5)
+        assert np.array_equal(f['atomic_numbers'][()], [79])
+        assert np.array_equal(f['atom_indices'][()], [0])
+        assert [d.decode() for d in f['cartesian_directions'][()]] == ['x', 'y', 'z']
+        assert np.array_equal(f['orbital_indices'][()], [0])
+        assert np.allclose(f['lattice'][()], 3.0 * np.eye(3))
+        assert np.allclose(f['supercell_matrix'][()], np.diag([2, 1, 1]))
+        assert f['finite_difference_delta'][()] == pytest.approx(0.01)
+        assert f.attrs['units'] == 'g in eV/Angstrom'
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -958,74 +623,45 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'maceh.epc.assemble'`
 import numpy as np
 import h5py
 
-from .electron import bloch_sum, band_window
 
-HBAR_JS = 1.054571817e-34
-AMU_KG = 1.66053906660e-27
-EV_J = 1.602176634e-19
-
-
-def zero_point_length(mass_amu, omega_ev):
-    r''' sqrt(hbar / (2 M omega)) in Angstrom, with M in amu and hbar*omega in eV '''
-    return HBAR_JS / np.sqrt(2.0 * mass_amu * AMU_KG * omega_ev * EV_J) * 1e10
-
-
-def compute_epc(deriv, solver, phonons, kpts, qpts, fermi_energy, energy_window,
-                omega_tol=1e-5):
-    r''' g_{m n nu}(k, q) = sum_{kappa alpha} sqrt(hbar / 2 M_kappa omega_{q nu})
-    e_{kappa alpha, nu}(q) <psi_{m,k+q}| dH/d tau_{kappa alpha}(q) |psi_{n,k}>,
-    with dH(k, q) = sum_p e^{2 pi i q.p} sum_R e^{2 pi i k.R} dH(p, R).
-    Modes with omega <= omega_tol (eV) are masked and their g set to zero. '''
-    kpts = [np.asarray(k, dtype=np.float64) for k in kpts]
-    qpts = [np.asarray(q, dtype=np.float64) for q in qpts]
-    all_k = kpts + [k + q for k in kpts for q in qpts]
-    b_lo, b_hi = band_window(solver, all_k, fermi_energy, energy_window)
-    nb = b_hi - b_lo
-    nk, nq, nmodes = len(kpts), len(qpts), 3 * phonons.natoms
-
-    g = np.zeros((nq, nmodes, nk, nb, nb), dtype=np.complex128)
-    omega_q = np.zeros((nq, nmodes))
-    soft_mode_mask = np.zeros((nq, nmodes), dtype=bool)
-    eps_k = np.zeros((nk, nb))
-    eps_kq = np.zeros((nq, nk, nb))
-
-    for iq, q in enumerate(qpts):
-        omega, evec = phonons.modes(q)
-        omega_q[iq] = omega
-        soft_mode_mask[iq] = omega <= omega_tol
-        pref = np.zeros((phonons.natoms, nmodes))
-        live = ~soft_mode_mask[iq]
-        for kappa in range(phonons.natoms):
-            pref[kappa, live] = zero_point_length(phonons.masses[kappa], omega[live])
-        # sum over displaced-atom cells p first (q-dependent, k-independent)
-        dHq = {}
-        for (kappa, alpha), by_pR in deriv.blocks.items():
-            acc = {}
-            for (p, R), m in by_pR.items():
-                phase = np.exp(2j * np.pi * (q @ np.asarray(p, dtype=np.float64)))
-                acc[R] = acc.get(R, 0) + phase * m
-            dHq[(kappa, alpha)] = acc
-        for ik, k in enumerate(kpts):
-            eps_n, C_n = solver.solve(k)
-            eps_m, C_m = solver.solve(k + q)
-            eps_k[ik] = eps_n[b_lo:b_hi]
-            eps_kq[iq, ik] = eps_m[b_lo:b_hi]
-            Cn = C_n[:, b_lo:b_hi]
-            Cm = C_m[:, b_lo:b_hi]
-            for (kappa, alpha), by_R in dHq.items():
-                M = Cm.conj().T @ bloch_sum(by_R, k) @ Cn
-                weight = (pref[kappa] * evec[kappa, alpha]).reshape(-1, 1, 1)
-                g[iq, :, ik] += weight * M[None, :, :]
-
-    return dict(g=g, omega_q=omega_q, soft_mode_mask=soft_mode_mask, eps_k=eps_k,
-                eps_kq=eps_kq, band_range=np.array([b_lo, b_hi]),
-                kpts=np.asarray(kpts), qpts=np.asarray(qpts))
+def compute_epc_cartesian(deriv, kpts, qpts):
+    r''' Cartesian atomic-orbital electron-phonon coupling
+    g_ijka(k, q) = sum_p e^{2 pi i q.p} sum_R e^{2 pi i k.R} [dH(p, R)]_ij
+    (cell-phase gauge). Returns g of shape (nk, nq, n_displaced, 3, norb, norb);
+    phonon-mode contraction and band transformation are left for downstream. '''
+    kpts = np.asarray(kpts, dtype=np.float64)
+    qpts = np.asarray(qpts, dtype=np.float64)
+    displaced = sorted({kappa for kappa, _ in deriv.blocks.keys()})
+    nk, nq = len(kpts), len(qpts)
+    norb = deriv.norb_tot
+    g = np.zeros((nk, nq, len(displaced), 3, norb, norb), dtype=np.complex128)
+    for ikap, kappa in enumerate(displaced):
+        for alpha in range(3):
+            for (p, R), m in deriv.blocks.get((kappa, alpha), {}).items():
+                # phase factors for all (k, q) at once
+                phase_q = np.exp(2j * np.pi * (qpts @ np.asarray(p, dtype=np.float64)))
+                phase_k = np.exp(2j * np.pi * (kpts @ np.asarray(R, dtype=np.float64)))
+                g[:, :, ikap, alpha] += (phase_k[:, None] * phase_q[None, :])[:, :, None, None] * m
+    return dict(g=g, atom_indices=np.array(displaced, dtype=int),
+                kpoints=kpts, qpoints=qpts)
 
 
-def write_epc_h5(path, results, attrs):
+def write_epc_cartesian_h5(path, results, struct, deriv, attrs):
+    norb_per_atom = np.diff(deriv.norb_cumsum)
+    orbital_indices = np.repeat(np.arange(deriv.n_uc_atoms), norb_per_atom)
     with h5py.File(path, 'w') as f:
-        for name, arr in results.items():
-            f[name] = arr
+        f['g_real'] = results['g'].real
+        f['g_imag'] = results['g'].imag
+        f['kpoints'] = results['kpoints']
+        f['qpoints'] = results['qpoints']
+        f['atomic_numbers'] = np.asarray(struct.numbers, dtype=int)
+        f['atom_indices'] = results['atom_indices']
+        f['cartesian_directions'] = np.array([b'x', b'y', b'z'])
+        f['orbital_indices'] = orbital_indices
+        f['lattice'] = struct.lattice
+        f['positions'] = struct.positions
+        f['supercell_matrix'] = np.diag(deriv.n_grid)
+        f['finite_difference_delta'] = deriv.delta
         for k, v in attrs.items():
             f.attrs[k] = v
 ```
@@ -1033,18 +669,18 @@ def write_epc_h5(path, results, attrs):
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `/opt/anaconda3/envs/DeepH/bin/python -m pytest tests/test_assemble.py -v`
-Expected: 4 PASSED
+Expected: 2 PASSED
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add maceh/epc/assemble.py tests/test_assemble.py
-git commit -m "feat(epc): g_mn,nu(k,q) contraction with phonon weighting and epc_pred.h5 writer"
+git commit -m "feat(epc): Fourier transform to Cartesian AO g_ij,ka(k,q) and h5 writer"
 ```
 
 ---
 
-### Task 7: EPC config (`maceh/parse_configs.py` + `maceh/default_configs/epc_default.ini`)
+### Task 5: EPC config (`maceh/parse_configs.py` + `maceh/default_configs/epc_default.ini`)
 
 **Files:**
 - Modify: `maceh/parse_configs.py` (append `EPCConfig` after `EvalConfig`, ~line 292)
@@ -1053,7 +689,7 @@ git commit -m "feat(epc): g_mn,nu(k,q) contraction with phonon weighting and epc
 
 **Interfaces:**
 - Consumes: `BaseConfig`, `EvalConfig` (existing).
-- Produces (used by Task 8): `EPCConfig(config_file)` — all `EvalConfig` attributes (`model_dir`, `device`, `torch_dtype`, `out_dir`, `target`, `inference`, plus `[data]` incl. `radius`) and new attributes `structure_dir: str`, `q_grid: tuple[int,int,int]`, `k_grid: tuple`, `delta: float`, `phonopy_dir: str`, `fermi_energy: float`, `energy_window: float`, `grad_threshold: float`, `omega_tol: float`, `atom_indices: list[int] | None`, `save_derivatives: bool`.
+- Produces (used by Task 6): `EPCConfig(config_file)` — all `EvalConfig` attributes (`model_dir`, `device`, `torch_dtype`, `out_dir`, `target`, `inference`, plus `[data]` incl. `radius`) and new attributes `structure_dir: str`, `q_grid: tuple[int,int,int]`, `k_grid: tuple`, `delta: float`, `grad_threshold: float`, `atom_indices: list[int] | None`, `save_derivatives: bool`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1084,9 +720,6 @@ structure_dir = {tmp_path}
 q_grid = 2 2 2
 k_grid = 4 4 4
 delta = 0.02
-phonopy_dir = {tmp_path}
-fermi_energy = -1.5
-energy_window = 1.0
 atom_indices = 0 2
 """
     path = tmp_path / 'epc.ini'
@@ -1099,13 +732,10 @@ def test_epc_config_parses(tmp_path):
     assert config.q_grid == (2, 2, 2)
     assert config.k_grid == (4, 4, 4)
     assert config.delta == pytest.approx(0.02)
-    assert config.fermi_energy == pytest.approx(-1.5)
-    assert config.energy_window == pytest.approx(1.0)
     assert config.atom_indices == [0, 2]
     assert config.radius == pytest.approx(7.2)
     # defaults from epc_default.ini
     assert config.grad_threshold == pytest.approx(1e-10)
-    assert config.omega_tol == pytest.approx(1e-5)
     assert config.save_derivatives is False
     assert config.inference is True
 
@@ -1159,31 +789,22 @@ radius = -1
 
 [epc]
 
-; structure_dir     string   Processed-data folder of ONE structure, containing lat.dat,
-;                            element.dat, site_positions.dat, orbital_types.dat, info.json,
-;                            overlaps.h5 and hamiltonians_pred.h5 (run deephe3-eval.py first).
+; structure_dir     string   Folder with lat.dat, element.dat, site_positions.dat of ONE
+;                            structure (DeepH processed-data conventions). Orbital counts
+;                            and spinful-ness come from the trained model's dataset_info.
 ; q_grid            3 ints   Uniform q-grid; also fixes the displacement supercell size.
-; k_grid            3 ints   Uniform k-grid for the electronic states.
+; k_grid            3 ints   Uniform k-grid.
 ; delta             float    Finite-difference displacement step (Angstrom).
-; phonopy_dir       string   Directory containing phonopy.yaml (+ FORCE_CONSTANTS) for the
-;                            same unit cell.
-; fermi_energy      float    Fermi level (eV) of the structure.
-; energy_window     float    Half-width (eV) around fermi_energy; only states inside are stored.
 ; grad_threshold    float    Derivative blocks with max|dH| below this (eV/Angstrom) are dropped.
-; omega_tol         float    Modes with energy below this (eV) are masked; their g is set to 0.
 ; atom_indices      ints     Optional 0-based unit-cell atoms to displace (blank = all).
 ;                            The acoustic sum rule diagnostic only runs when blank.
-; save_derivatives  bool     Also store the raw dH/dR blocks in epc_pred.h5 (large!).
+; save_derivatives  bool     Also store the raw dH/dR blocks in epc_cartesian_pred.h5 (large!).
 
 structure_dir =
 q_grid = 1 1 1
 k_grid = 1 1 1
 delta = 0.01
-phonopy_dir =
-fermi_energy = 0.0
-energy_window = 2.0
 grad_threshold = 1e-10
-omega_tol = 1e-5
 atom_indices =
 save_derivatives = False
 ```
@@ -1211,11 +832,7 @@ class EPCConfig(EvalConfig):
         self.k_grid = tuple(int(x) for x in self._config.get('epc', 'k_grid').split())
         assert len(self.q_grid) == 3 and len(self.k_grid) == 3
         self.delta = self._config.getfloat('epc', 'delta')
-        self.phonopy_dir = self._config.get('epc', 'phonopy_dir')
-        self.fermi_energy = self._config.getfloat('epc', 'fermi_energy')
-        self.energy_window = self._config.getfloat('epc', 'energy_window')
         self.grad_threshold = self._config.getfloat('epc', 'grad_threshold')
-        self.omega_tol = self._config.getfloat('epc', 'omega_tol')
         ai = self._config.get('epc', 'atom_indices')
         self.atom_indices = [int(x) for x in ai.split()] if ai.strip() else None
         self.save_derivatives = self._config.getboolean('epc', 'save_derivatives')
@@ -1237,22 +854,21 @@ git commit -m "feat(epc): EPCConfig and default config for deephe3-epc.py"
 
 ---
 
-### Task 8: Orchestrator, CLI, docs (`maceh/epc/run.py`, `deephe3-epc.py`)
+### Task 6: Orchestrator, CLI, docs (`maceh/epc/run.py`, `deephe3-epc.py`)
 
 **Files:**
 - Create: `maceh/epc/run.py`
 - Create: `deephe3-epc.py`
 - Modify: `README.md` (add EPC section under Usage)
-- Modify: `environment.yml` (add `phonopy` to the pip dependencies; read the file first and match its formatting)
 - Test: `tests/test_run_smoke.py`
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–7; `DeepHE3Kernel`, `NetOutInfo` from `maceh/kernel.py`; `Collater`, `get_edge_fea` from `maceh/graph.py`.
-- Produces: `run_epc(config_path: str, debug: bool = False)`; helpers `load_model_contexts(config) -> list[(kernel, net, construct_kernel)]` and `make_predict_fn(contexts, data, config, debug=False) -> callable` (the `predict_fn` consumed by `finite_difference`).
+- Consumes: everything from Tasks 1–5; `DeepHE3Kernel`, `NetOutInfo` from `maceh/kernel.py`; `Collater`, `get_edge_fea` from `maceh/graph.py`.
+- Produces: `run_epc(config_path: str, debug: bool = False)`; helpers `load_model_contexts(config) -> list[(kernel, net, construct_kernel)]`, `make_predict_fn(contexts, data, config, debug=False) -> callable` (the `predict_fn` consumed by `finite_difference`), and `atom_norb_from_model(dataset_info, numbers) -> np.ndarray norb_cumsum` (per-unit-cell-atom orbital counts derived from the model's dataset_info, doubled when spinful).
 
 - [ ] **Step 1: Write the failing smoke test**
 
-Full `run_epc` needs a trained checkpoint, which CI does not have; the smoke test covers importability and CLI wiring (real-model verification is the manual step at the end).
+Full `run_epc` needs a trained checkpoint, which CI does not have; the smoke test covers importability, the orbital-count helper, and CLI wiring (real-model verification is the manual step at the end).
 
 Create `tests/test_run_smoke.py`:
 
@@ -1260,10 +876,25 @@ Create `tests/test_run_smoke.py`:
 import subprocess
 import sys
 
+import numpy as np
+import torch
+
 
 def test_run_module_imports():
     from maceh.epc.run import run_epc, load_model_contexts, make_predict_fn
     assert callable(run_epc)
+
+
+def test_atom_norb_from_model():
+    from maceh.epc.run import atom_norb_from_model
+    from maceh.kernel import DatasetInfo
+    # species 0 = Z 6 with s+p (4 orbitals), species 1 = Z 79 with s (1 orbital)
+    info = DatasetInfo(spinful=False, index_to_Z=[6, 79], orbital_types=[[0, 1], [0]])
+    cumsum = atom_norb_from_model(info, np.array([79, 6, 6]))
+    assert list(cumsum) == [0, 1, 5, 9]
+    info_sp = DatasetInfo(spinful=True, index_to_Z=[6, 79], orbital_types=[[0, 1], [0]])
+    cumsum_sp = atom_norb_from_model(info_sp, np.array([79, 6]))
+    assert list(cumsum_sp) == [0, 2, 10]
 
 
 def test_cli_help():
@@ -1282,7 +913,6 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'maceh.epc.run'`
 
 ```python
 import os
-import json
 import time
 import warnings
 
@@ -1295,9 +925,20 @@ from ..graph import Collater, get_edge_fea
 from ..parse_configs import EPCConfig
 from .supercell import load_structure, build_supercell, uniform_grid
 from .derivative import build_supercell_graph, finite_difference, acoustic_sum_rule
-from .electron import load_orbital_slices, load_blocks_h5, blocks_to_dense, ElectronSolver
-from .phonon import PhononData
-from .assemble import compute_epc, write_epc_h5
+from .assemble import compute_epc_cartesian, write_epc_cartesian_h5
+
+
+def atom_norb_from_model(dataset_info, numbers):
+    r''' per-atom orbital counts (doubled when spinful) derived from the trained
+    model's dataset_info; returns the cumulative-sum slice boundaries '''
+    norb_per_species = [sum(2 * l + 1 for l in types) for types in dataset_info.orbital_types]
+    factor = 2 if dataset_info.spinful else 1
+    norb = []
+    for Z in numbers:
+        species = int(dataset_info.Z_to_index[int(Z)])
+        assert species >= 0, f'element Z={Z} unknown to the model'
+        norb.append(factor * norb_per_species[species])
+    return np.concatenate([[0], np.cumsum(norb)])
 
 
 def load_model_contexts(config):
@@ -1349,16 +990,11 @@ def run_epc(config_path, debug=False):
                       'dtype = double is strongly recommended for EPC')
 
     struct = load_structure(config.structure_dir)
-    with open(os.path.join(config.structure_dir, 'info.json')) as f:
-        spinful = json.load(f)['isspinful']
-    norb_list, norb_cumsum = load_orbital_slices(
-        os.path.join(config.structure_dir, 'orbital_types.dat'), spinful=spinful)
 
     print('\n------- Loading trained model(s) -------')
     contexts = load_model_contexts(config)
     kernel0 = contexts[0][0]
-    assert kernel0.dataset_info.spinful == spinful, \
-        'model spinful does not match structure info.json'
+    norb_cumsum = atom_norb_from_model(kernel0.dataset_info, struct.numbers)
 
     print('\n------- Stage 1: finite-difference Hamiltonian derivatives -------')
     sc_struct, smap = build_supercell(struct, config.q_grid)
@@ -1402,37 +1038,21 @@ def run_epc(config_path, debug=False):
     if config.atom_indices is None:
         print(f'acoustic sum rule violation: {acoustic_sum_rule(deriv):.3e} eV/A')
 
-    print('\n------- Stage 2: electron-phonon coupling assembly -------')
-    H_by_R = blocks_to_dense(
-        load_blocks_h5(os.path.join(config.structure_dir, 'hamiltonians_pred.h5')),
-        norb_cumsum)
-    S_by_R = blocks_to_dense(
-        load_blocks_h5(os.path.join(config.structure_dir, 'overlaps.h5')),
-        norb_cumsum, spin_expand=spinful)
-    solver = ElectronSolver(H_by_R, S_by_R)
-    phonons = PhononData.from_directory(config.phonopy_dir)
-    assert phonons.natoms == len(struct.numbers), \
-        'phonopy primitive cell does not match the structure'
-    frac = struct.positions @ np.linalg.inv(struct.lattice)
-    if not np.allclose(np.mod(frac, 1.0), np.mod(phonons.frac_coords, 1.0), atol=1e-3):
-        warnings.warn('phonopy atom positions differ from the structure; '
-                      'check that phonopy.yaml belongs to this unit cell')
-
-    results = compute_epc(deriv, solver, phonons,
-                          kpts=uniform_grid(config.k_grid), qpts=uniform_grid(config.q_grid),
-                          fermi_energy=config.fermi_energy,
-                          energy_window=config.energy_window,
-                          omega_tol=config.omega_tol)
+    print('\n------- Stage 2: Fourier transform to g_ij,ka(k, q) -------')
+    results = compute_epc_cartesian(deriv, kpts=uniform_grid(config.k_grid),
+                                    qpts=uniform_grid(config.q_grid))
 
     stru_id = os.path.basename(os.path.normpath(config.structure_dir))
     out_dir = os.path.join(config.out_dir, stru_id)
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, 'epc_pred.h5')
-    write_epc_h5(out_path, results, dict(
-        fermi_energy=config.fermi_energy, energy_window=config.energy_window,
-        delta=config.delta, spinful=spinful, model_dir=config.model_dir,
-        units='g, eps, omega in eV; dH in eV/Angstrom; masses in amu',
-        note='dS/dtau corrections are neglected (model predicts H only)',
+    out_path = os.path.join(out_dir, 'epc_cartesian_pred.h5')
+    write_epc_cartesian_h5(out_path, results, struct, deriv, dict(
+        units='g in eV/Angstrom; k, q fractional; lattice, positions in Angstrom',
+        spinful=kernel0.dataset_info.spinful, delta=config.delta,
+        model_dir=config.model_dir,
+        note='Cartesian AO coupling g_ij,ka(k,q) = [dH(k,q)/dtau_ka]_ij; phonon-mode '
+             'contraction and band transformation (incl. possible dS/dtau handling) '
+             'are left for downstream postprocessing',
         date=time.strftime('%Y-%m-%d %H:%M:%S')))
     if config.save_derivatives:
         with h5py.File(out_path, 'a') as f:
@@ -1457,8 +1077,8 @@ import os
 import argparse
 
 parser = argparse.ArgumentParser(
-    description='Compute electron-phonon coupling g_mn,nu(k,q) from finite-difference '
-                'derivatives of the predicted Hamiltonian')
+    description='Compute the Cartesian AO electron-phonon coupling g_ij,ka(k,q) from '
+                'finite-difference derivatives of the predicted Hamiltonian')
 parser.add_argument('config', type=str, metavar='CONFIG', help='Config file for EPC calculation')
 parser.add_argument('-n', type=int, default=None, help='Maximum number of threads')
 parser.add_argument('--debug', action='store_true',
@@ -1481,21 +1101,19 @@ run_epc(args.config, debug=args.debug)
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `/opt/anaconda3/envs/DeepH/bin/python -m pytest tests/test_run_smoke.py -v`
-Expected: 2 PASSED (note: `test_cli_help` runs under `sys.executable`; run pytest with the DeepH python so the subprocess also has the deps).
+Expected: 3 PASSED (note: `test_cli_help` runs `sys.executable`, so run pytest with the DeepH python; `--help` exits before the heavy `maceh` import because `parse_args()` is called first).
 
-- [ ] **Step 6: Update README.md and environment.yml**
+- [ ] **Step 6: Update README.md**
 
 In `README.md`, after the "Model inference" section, add:
 
 ```markdown
-### Electron-phonon coupling
+### Electron-phonon coupling (Cartesian AO basis)
 
-Given a trained model, the predicted `hamiltonians_pred.h5` (from `deephe3-eval.py`), the
-overlap matrices `overlaps.h5` (preprocess with `get_overlap = True`), and a phonopy
-calculation (`phonopy.yaml` + `FORCE_CONSTANTS`) for the same unit cell, you can compute
-electron-phonon coupling matrix elements
+Given a trained model and a structure (lat.dat, element.dat, site_positions.dat), you can
+compute the Cartesian atomic-orbital electron-phonon coupling
 
-g_mnv(k, q) = sum_ka sqrt(hbar / 2 M_k w_qv) e_kav(q) <psi_m,k+q| dH/dtau_ka(q) |psi_n,k>
+g_ij,ka(k, q) = [dH(k, q) / dtau_ka]_ij
 
 on uniform k/q grids with
 
@@ -1505,16 +1123,16 @@ ${python_path} ./deephe3-epc.py ./configs/epc.ini
 
 The Hamiltonian derivatives dH/dtau are obtained by central finite differences of the
 model prediction on a supercell commensurate with the q-grid (the supercell graph is
-built once; only the edge vectors are recomputed for each displacement). Electronic
-states come from diagonalizing the generalized problem H(k)C = S(k)Ce within an energy
-window around the Fermi level; phonon frequencies and eigenvectors are read through the
-phonopy API. Results are written to `<output_dir>/<stru_id>/epc_pred.h5`.
+built once; only the edge vectors are recomputed for each displacement), folded back to
+cell-resolved dH_ij(R)/dtau_ka(p) and Fourier transformed. Results are written to
+`<output_dir>/<stru_id>/epc_cartesian_pred.h5` (complex g stored as g_real/g_imag with
+shape [nk, nq, natoms, 3, norb, norb], plus grids and structure metadata).
 
-Note: in the non-orthogonal NAO basis the rigorous coupling also contains dS/dtau
-correction terms. The model predicts H only, so these terms are neglected here.
+This output is the electronic perturbation before contraction with phonon eigenvectors
+and before transformation to band eigenstates; those steps (which need phonon data,
+electronic eigenvectors, and in the non-orthogonal NAO basis possibly dS/dtau handling)
+are downstream postprocessing.
 ```
-
-In `environment.yml`, add `phonopy` to the pip dependency list (read the file first; keep its formatting).
 
 - [ ] **Step 7: Run the full test suite**
 
@@ -1524,18 +1142,18 @@ Expected: all tests pass.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add maceh/epc/run.py deephe3-epc.py tests/test_run_smoke.py README.md environment.yml
-git commit -m "feat(epc): deephe3-epc.py CLI, run orchestrator, docs and phonopy dependency"
+git add maceh/epc/run.py deephe3-epc.py tests/test_run_smoke.py README.md
+git commit -m "feat(epc): deephe3-epc.py CLI, run orchestrator and docs for Cartesian AO EPC"
 ```
 
 ---
 
 ### Manual verification (requires a trained model — cannot run in CI)
 
-After all tasks: with a trained model directory, a structure processed with `get_overlap = True`, a prior `deephe3-eval.py` run, and phonopy output, run:
+After all tasks: with a trained model directory and a structure folder, run:
 
 ```bash
 /opt/anaconda3/envs/DeepH/bin/python deephe3-epc.py configs/epc.ini | tee sh/log_epc.txt
 ```
 
-Check the printed diagnostics: (1) the edge_attr self-check passes silently (an AssertionError means convention drift); (2) delta-convergence deviation is small (≲1e-3 eV/Å); (3) the acoustic sum rule violation is small compared to typical |dH| values; (4) at q = Γ, `g` for acoustic modes is masked. The q=0 fold-back cross-check from the spec: run once with `q_grid = 1 1 1` and once with e.g. `2 1 1`, and compare `g` at the shared q=Γ, k=Γ point — they must agree to FD accuracy.
+Check the printed diagnostics: (1) the edge_attr self-check passes silently (an AssertionError means convention drift); (2) delta-convergence deviation is small (≲1e-3 eV/Å); (3) the acoustic sum rule violation is small compared to typical |dH| values. The q=0 fold-back cross-check from the spec: run once with `q_grid = 1 1 1` and once with e.g. `2 1 1`, and compare `g` at the shared k=Γ, q=Γ point — they must agree to FD accuracy.

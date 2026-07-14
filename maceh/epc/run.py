@@ -37,6 +37,9 @@ def load_model_contexts(config):
         kernel.eval_config = config
         kernel.load_config(train_config_path=os.path.join(model_path, 'src/train.ini'))
         kernel.dataset_info = NetOutInfo.from_json(os.path.join(model_path, 'src')).dataset_info
+        if contexts:
+            assert kernel.dataset_info == contexts[0][0].dataset_info, \
+                'all models must share the same dataset_info (species/orbital layout)'
         kernel.config_set_target()
         construct_kernel = kernel.register_constructor(device=config.device)
         net = kernel.load_model(os.path.join(model_path, 'src'), device=config.device)
@@ -63,6 +66,11 @@ def make_predict_fn(contexts, data, config, debug=False):
             H_pred = construct_kernel.get_H(output_edge).cpu().numpy()
             kernel.update_hopping(H, H_pred, batch.x.cpu(), batch.edge_index.cpu(),
                                   batch.edge_key.cpu(), debug=debug)
+        if not debug:
+            msg = ('Some orbitals are not predicted. You can include option --debug to '
+                   'fill unpredicted matrix elements with 0.')
+            for hopping in H.values():
+                assert not np.isnan(hopping).any(), msg
         return H
 
     return predict_fn
@@ -116,9 +124,16 @@ def run_epc(config_path, debug=False):
     dev = 0.0
     for alpha in range(3):
         full = deriv.blocks[(probe[0], alpha)]
-        for pR, m in deriv_half.blocks[(probe[0], alpha)].items():
-            if pR in full:
-                dev = max(dev, float(np.abs(full[pR] - m).max()))
+        half = deriv_half.blocks[(probe[0], alpha)]
+        for pR in set(full) | set(half):
+            a = full.get(pR)
+            b = half.get(pR)
+            if a is None:
+                dev = max(dev, float(np.abs(b).max()))
+            elif b is None:
+                dev = max(dev, float(np.abs(a).max()))
+            else:
+                dev = max(dev, float(np.abs(a - b).max()))
     print(f'delta-convergence: max |dH(delta) - dH(delta/2)| = {dev:.3e} eV/A '
           f'(delta = {config.delta} A)')
     if config.atom_indices is None:

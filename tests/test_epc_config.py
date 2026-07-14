@@ -48,3 +48,11 @@ def test_epc_config_requires_radius(tmp_path):
     open(path, 'w').write(text)
     with pytest.raises(AssertionError):
         EPCConfig(path)
+
+
+def test_epc_config_requires_positive_grid(tmp_path):
+    path = write_config(tmp_path)
+    text = open(path).read().replace('q_grid = 2 2 2', 'q_grid = 0 1 1')
+    open(path, 'w').write(text)
+    with pytest.raises(AssertionError):
+        EPCConfig(path)

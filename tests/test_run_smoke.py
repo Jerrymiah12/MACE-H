@@ -1,8 +1,8 @@
+import os
 import subprocess
 import sys
 
 import numpy as np
-import torch
 
 
 def test_run_module_imports():
@@ -23,7 +23,8 @@ def test_atom_norb_from_model():
 
 
 def test_cli_help():
-    out = subprocess.run([sys.executable, 'deephe3-epc.py', '--help'],
+    script = os.path.join(os.path.dirname(__file__), '..', 'deephe3-epc.py')
+    out = subprocess.run([sys.executable, script, '--help'],
                          capture_output=True, text=True)
     assert out.returncode == 0
     assert 'electron-phonon' in out.stdout.lower()

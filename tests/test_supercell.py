@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 
 from maceh.epc.supercell import (Structure, SupercellMap, build_supercell,
                                  fold_key, uniform_grid, load_structure)

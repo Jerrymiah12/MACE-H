@@ -75,3 +75,11 @@ def test_acoustic_sum_rule_zero_for_translation_invariant_model():
     deriv = finite_difference(predict_fn, pos0, smap, np.array([0, 1]), delta=1e-4,
                               grad_threshold=1e-12)
     assert acoustic_sum_rule(deriv) < 1e-6
+
+
+def test_atom_indices_out_of_range_rejected():
+    smap = SupercellMap((2, 1, 1), n_uc_atoms=1)
+    pos0 = torch.tensor([[0.0, 0.0, 0.0], [A, 0.0, 0.0]], dtype=torch.float64)
+    with pytest.raises(AssertionError):
+        finite_difference(predict_fn, pos0, smap, np.array([0, 1]), delta=1e-4,
+                          atom_indices=[1])

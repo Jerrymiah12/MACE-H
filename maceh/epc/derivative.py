@@ -52,6 +52,8 @@ def finite_difference(predict_fn, positions0, smap, norb_cumsum, delta,
     of home-cell atoms, folded back to unit-cell labels via fold_key '''
     if atom_indices is None:
         atom_indices = list(range(smap.n_uc_atoms))
+    assert all(0 <= kappa < smap.n_uc_atoms for kappa in atom_indices), \
+        f'atom_indices must be 0-based unit-cell atom indices in [0, {smap.n_uc_atoms})'
     norb_cumsum = np.asarray(norb_cumsum)
     norb_tot = int(norb_cumsum[-1])
     blocks = {}

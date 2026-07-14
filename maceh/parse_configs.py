@@ -308,6 +308,8 @@ class EPCConfig(EvalConfig):
         self.q_grid = tuple(int(x) for x in self._config.get('epc', 'q_grid').split())
         self.k_grid = tuple(int(x) for x in self._config.get('epc', 'k_grid').split())
         assert len(self.q_grid) == 3 and len(self.k_grid) == 3
+        assert all(n > 0 for n in self.q_grid + self.k_grid), \
+            'q_grid and k_grid entries must be positive integers'
         self.delta = self._config.getfloat('epc', 'delta')
         self.grad_threshold = self._config.getfloat('epc', 'grad_threshold')
         ai = self._config.get('epc', 'atom_indices')
@@ -315,4 +317,3 @@ class EPCConfig(EvalConfig):
         self.save_derivatives = self._config.getboolean('epc', 'save_derivatives')
         assert self.inference, 'EPC requires inference = True'
         assert self.radius > 0, 'EPC requires [data] radius > 0 (supercell graph cutoff)'
-        

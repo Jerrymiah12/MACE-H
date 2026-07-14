@@ -289,4 +289,30 @@ class EvalConfig(BaseConfig):
         self.inference = self._config.getboolean('basic', 'inference')
         self.test_only = self._config.getboolean('basic', 'test_only')
         if self.test_only: assert not self.inference
+
+
+class EPCConfig(EvalConfig):
+    def __init__(self, config_file):
+        BaseConfig.__init__(self)
+        epc_default = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   'default_configs/epc_default.ini')
+        print(f'Loading EPC config from: {config_file}')
+        self.get_config(config_file, config_file_default=epc_default)
+
+        self.get_basic_section()
+        self.get_data_section()
+        self.get_epc_section()
+
+    def get_epc_section(self):
+        self.structure_dir = self._config.get('epc', 'structure_dir')
+        self.q_grid = tuple(int(x) for x in self._config.get('epc', 'q_grid').split())
+        self.k_grid = tuple(int(x) for x in self._config.get('epc', 'k_grid').split())
+        assert len(self.q_grid) == 3 and len(self.k_grid) == 3
+        self.delta = self._config.getfloat('epc', 'delta')
+        self.grad_threshold = self._config.getfloat('epc', 'grad_threshold')
+        ai = self._config.get('epc', 'atom_indices')
+        self.atom_indices = [int(x) for x in ai.split()] if ai.strip() else None
+        self.save_derivatives = self._config.getboolean('epc', 'save_derivatives')
+        assert self.inference, 'EPC requires inference = True'
+        assert self.radius > 0, 'EPC requires [data] radius > 0 (supercell graph cutoff)'
         

@@ -27,3 +27,68 @@ def build_supercell_graph(struct, radius, default_dtype_torch):
     assert torch.allclose(recomputed, data.edge_attr, atol=1e-7), \
         'edge_attr recomputed from positions does not match graph construction'
     return data
+
+
+@dataclass
+class DerivativeData:
+    r''' real-space Hamiltonian derivatives dH_ij(R)/d tau_{kappa,alpha}(p).
+    blocks[(kappa, alpha)][(p, R)] is a dense (norb_tot, norb_tot) unit-cell matrix;
+    p labels the cell of the displaced atom relative to the bra atom's cell,
+    R the bra->ket cell offset (both in unit-cell lattice units). Units: eV / Angstrom. '''
+    n_grid: tuple
+    n_uc_atoms: int
+    delta: float
+    norb_cumsum: np.ndarray
+    blocks: dict
+
+    @property
+    def norb_tot(self):
+        return int(self.norb_cumsum[-1])
+
+
+def finite_difference(predict_fn, positions0, smap, norb_cumsum, delta,
+                      atom_indices=None, grad_threshold=1e-10):
+    r''' central finite differences of predicted hopping blocks w.r.t. displacements
+    of home-cell atoms, folded back to unit-cell labels via fold_key '''
+    if atom_indices is None:
+        atom_indices = list(range(smap.n_uc_atoms))
+    norb_cumsum = np.asarray(norb_cumsum)
+    norb_tot = int(norb_cumsum[-1])
+    blocks = {}
+    for kappa in atom_indices:
+        for alpha in range(3):
+            pos_plus = positions0.clone()
+            pos_plus[kappa, alpha] += delta
+            pos_minus = positions0.clone()
+            pos_minus[kappa, alpha] -= delta
+            H_plus = predict_fn(pos_plus)
+            H_minus = predict_fn(pos_minus)
+            assert H_plus.keys() == H_minus.keys()
+            out = {}
+            for key_str, hp in H_plus.items():
+                d = (np.asarray(hp) - np.asarray(H_minus[key_str])) / (2.0 * delta)
+                if np.abs(d).max() < grad_threshold:
+                    continue
+                p, R, i, j = fold_key(json.loads(key_str), smap)
+                if (p, R) not in out:
+                    dtype = np.complex128 if np.iscomplexobj(d) else np.float64
+                    out[(p, R)] = np.zeros((norb_tot, norb_tot), dtype=dtype)
+                out[(p, R)][norb_cumsum[i]:norb_cumsum[i + 1],
+                            norb_cumsum[j]:norb_cumsum[j + 1]] = d
+            blocks[(kappa, alpha)] = out
+    return DerivativeData(n_grid=smap.n_grid, n_uc_atoms=smap.n_uc_atoms, delta=delta,
+                          norb_cumsum=norb_cumsum, blocks=blocks)
+
+
+def acoustic_sum_rule(deriv):
+    r''' max over alpha and R of |sum_{kappa, p} dH(R)|; should vanish for a
+    translation-invariant model. Only meaningful when all atoms were displaced. '''
+    worst = 0.0
+    for alpha in range(3):
+        acc = {}
+        for kappa in range(deriv.n_uc_atoms):
+            for (p, R), dense in deriv.blocks.get((kappa, alpha), {}).items():
+                acc[R] = acc.get(R, 0) + dense
+        for m in acc.values():
+            worst = max(worst, float(np.abs(m).max()))
+    return worst

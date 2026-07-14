@@ -56,3 +56,11 @@ def test_epc_config_requires_positive_grid(tmp_path):
     open(path, 'w').write(text)
     with pytest.raises(AssertionError):
         EPCConfig(path)
+
+
+def test_epc_config_rejects_zero_delta(tmp_path):
+    path = write_config(tmp_path)
+    text = open(path).read().replace('delta = 0.02', 'delta = 0.0')
+    open(path, 'w').write(text)
+    with pytest.raises(AssertionError):
+        EPCConfig(path)

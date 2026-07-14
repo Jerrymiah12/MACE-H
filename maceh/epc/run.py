@@ -10,8 +10,9 @@ from ..kernel import DeepHE3Kernel, NetOutInfo
 from ..graph import Collater, get_edge_fea
 from ..parse_configs import EPCConfig
 from .supercell import load_structure, build_supercell, uniform_grid
-from .derivative import build_supercell_graph, finite_difference, acoustic_sum_rule
-from .assemble import compute_epc_cartesian, write_epc_cartesian_h5
+from .derivative import (build_supercell_graph, finite_difference, acoustic_sum_rule,
+                         hermitize_blocks)
+from .assemble import write_epc_cartesian_h5
 
 
 def atom_norb_from_model(dataset_info, numbers):
@@ -34,8 +35,15 @@ def load_model_contexts(config):
     contexts = []
     for model_path in DeepHE3Kernel.find_model(config.model_dir):
         kernel = DeepHE3Kernel()
-        kernel.eval_config = config
         kernel.load_config(train_config_path=os.path.join(model_path, 'src/train.ini'))
+        assert kernel.train_config.target == config.target, \
+            f'model predicts {kernel.train_config.target} but EPC requires {config.target}'
+        # EPC precision is decoupled from the recorded training dtype: the network is
+        # built and its checkpoint loaded at the EPC dtype (load_state_dict casts), and
+        # train_config's dtype fields must follow so update_hopping allocates hopping
+        # blocks at the same precision instead of rounding derivatives back to float32
+        kernel.train_config.set_dtype('double' if config.torch_dtype == torch.float64 else 'float')
+        kernel.eval_config = config
         kernel.dataset_info = NetOutInfo.from_json(os.path.join(model_path, 'src')).dataset_info
         if contexts:
             assert kernel.dataset_info == contexts[0][0].dataset_info, \
@@ -71,7 +79,8 @@ def make_predict_fn(contexts, data, config, debug=False):
                    'fill unpredicted matrix elements with 0.')
             for hopping in H.values():
                 assert not np.isnan(hopping).any(), msg
-        return H
+        # differentiate the same symmetrized Hamiltonian the band postprocessing uses
+        return hermitize_blocks(H)
 
     return predict_fn
 
@@ -140,14 +149,14 @@ def run_epc(config_path, debug=False):
         print(f'acoustic sum rule violation: {acoustic_sum_rule(deriv):.3e} eV/A')
 
     print('\n------- Stage 2: Fourier transform to g_ij,ka(k, q) -------')
-    results = compute_epc_cartesian(deriv, kpts=uniform_grid(config.k_grid),
-                                    qpts=uniform_grid(config.q_grid))
-
     stru_id = os.path.basename(os.path.normpath(config.structure_dir))
     out_dir = os.path.join(config.out_dir, stru_id)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, 'epc_cartesian_pred.h5')
-    write_epc_cartesian_h5(out_path, results, struct, deriv, dict(
+    write_epc_cartesian_h5(out_path, struct, deriv,
+                           kpts=uniform_grid(config.k_grid),
+                           qpts=uniform_grid(config.q_grid),
+                           attrs=dict(
         units='g in eV/Angstrom; k, q fractional; lattice, positions in Angstrom',
         spinful=kernel0.dataset_info.spinful, delta=config.delta,
         model_dir=config.model_dir,

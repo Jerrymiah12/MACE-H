@@ -311,7 +311,11 @@ class EPCConfig(EvalConfig):
         assert all(n > 0 for n in self.q_grid + self.k_grid), \
             'q_grid and k_grid entries must be positive integers'
         self.delta = self._config.getfloat('epc', 'delta')
+        assert np.isfinite(self.delta) and self.delta > 0, \
+            'delta must be a positive finite displacement (Angstrom)'
         self.grad_threshold = self._config.getfloat('epc', 'grad_threshold')
+        assert np.isfinite(self.grad_threshold) and self.grad_threshold >= 0, \
+            'grad_threshold must be a nonnegative finite number (eV/Angstrom)'
         ai = self._config.get('epc', 'atom_indices')
         self.atom_indices = [int(x) for x in ai.split()] if ai.strip() else None
         self.save_derivatives = self._config.getboolean('epc', 'save_derivatives')

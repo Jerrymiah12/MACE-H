@@ -252,10 +252,11 @@ def get_graph(cart_coords, frac_coords, numbers, stru_id, r, max_num_nbr, edge_A
             dist = torch.norm(nn_coords - cart_coord[None, :], dim=1)
 
             # allow edge with distance = 0
+            # (reshape, not squeeze: a single neighbor must stay 2D/1D)
             if True:
-                nn_coords = nn_coords.squeeze()
-                nn_indices = nn_indices.squeeze()
-                dist = dist.squeeze()
+                nn_coords = nn_coords.reshape(-1, 3)
+                nn_indices = nn_indices.reshape(-1)
+                dist = dist.reshape(-1)
             else:
                 nonzero_index = dist.nonzero(as_tuple=False)
                 nn_coords = nn_coords[nonzero_index]

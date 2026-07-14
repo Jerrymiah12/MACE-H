@@ -46,10 +46,27 @@ class DerivativeData:
         return int(self.norb_cumsum[-1])
 
 
+def hermitize_blocks(H):
+    r''' H_ij(R) <- (H_ij(R) + H_ji(-R)^dagger) / 2, matching the symmetrization the
+    band-structure postprocessing applies to predicted Hamiltonians (Band.py,
+    force_hermiticity=True). Differentiating the symmetrized Hamiltonian keeps
+    g(k,q)^dagger = g(k+q,-q). Requires the directed edge set to be closed under
+    (R, i, j) -> (-R, j, i), which radius-based graphs guarantee. '''
+    out = {}
+    for key_str, v in H.items():
+        key = json.loads(key_str)
+        adj = str([-key[0], -key[1], -key[2], key[4], key[3]])
+        assert adj in H, f'missing reverse hopping partner for {key_str}'
+        out[key_str] = (np.asarray(v) + np.asarray(H[adj]).conj().T) / 2.0
+    return out
+
+
 def finite_difference(predict_fn, positions0, smap, norb_cumsum, delta,
                       atom_indices=None, grad_threshold=1e-10):
     r''' central finite differences of predicted hopping blocks w.r.t. displacements
     of home-cell atoms, folded back to unit-cell labels via fold_key '''
+    assert np.isfinite(delta) and delta > 0, \
+        'delta must be a positive finite displacement (Angstrom)'
     if atom_indices is None:
         atom_indices = list(range(smap.n_uc_atoms))
     assert all(0 <= kappa < smap.n_uc_atoms for kappa in atom_indices), \

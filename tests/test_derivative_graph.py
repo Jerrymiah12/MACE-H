@@ -32,3 +32,21 @@ def test_build_supercell_graph():
             assert (-r1, -r2, -r3, j, i) in keys
     finally:
         torch.set_default_dtype(prev)
+
+
+def test_single_neighbor_graph():
+    # one atom in a cubic cell with radius below the lattice constant has only its
+    # self edge; the neighbor arrays must keep their 2D/1D shapes (reshape, not
+    # squeeze) for graph construction to succeed
+    prev = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        struct = Structure(positions=np.zeros((1, 3)),
+                           lattice=4.0 * np.eye(3),
+                           numbers=np.array([79]))
+        data = build_supercell_graph(struct, radius=3.0, default_dtype_torch=torch.float64)
+        assert data.edge_key.shape[0] == 1
+        assert data.edge_key[0].tolist() == [0, 0, 0, 1, 1]
+        assert torch.allclose(data.edge_attr[0], torch.zeros(4, dtype=torch.float64))
+    finally:
+        torch.set_default_dtype(prev)

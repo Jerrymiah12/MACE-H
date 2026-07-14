@@ -41,15 +41,17 @@ def test_write_epc_cartesian_h5(tmp_path):
     struct = Structure(positions=np.array([[0.0, 0.0, 0.0]]),
                        lattice=3.0 * np.eye(3),
                        numbers=np.array([79]))
-    kpts = np.array([[0.0, 0.0, 0.0]])
-    qpts = np.array([[0.0, 0.0, 0.0]])
+    kpts = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
+    qpts = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
     res = compute_epc_cartesian(deriv, kpts, qpts)
     path = str(tmp_path / 'epc_cartesian_pred.h5')
-    write_epc_cartesian_h5(path, res, struct, deriv,
+    write_epc_cartesian_h5(path, struct, deriv, kpts, qpts,
                            {'units': 'g in eV/Angstrom', 'spinful': False})
     with h5py.File(path, 'r') as f:
-        assert f['g_real'].shape == (1, 1, 1, 3, 1, 1)
-        assert f['g_imag'].shape == (1, 1, 1, 3, 1, 1)
+        assert f['g_real'].shape == (2, 2, 1, 3, 1, 1)
+        assert f['g_imag'].shape == (2, 2, 1, 3, 1, 1)
+        # streamed output equals the in-memory computation
+        assert np.allclose(f['g_real'][()] + 1j * f['g_imag'][()], res['g'])
         assert f['g_real'][0, 0, 0, 0, 0, 0] == pytest.approx(1.5)
         assert np.array_equal(f['atomic_numbers'][()], [79])
         assert np.array_equal(f['atom_indices'][()], [0])

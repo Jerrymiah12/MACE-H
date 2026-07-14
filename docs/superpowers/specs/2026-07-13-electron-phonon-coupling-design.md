@@ -62,6 +62,12 @@ Unchanged from the original design:
    pos[i]`). Startup self-check asserts the recomputed unperturbed `edge_attr`
    matches graph construction.
 3. Central differences with δ = 0.01 Å default; 6N supercell forward passes.
+   Predicted blocks are Hermitized (H_ij(R) ← (H_ij(R) + H_ji(−R)†)/2, matching
+   the band-structure postprocessing) before differencing, so g is the
+   derivative of the same Hamiltonian used for bands and satisfies
+   g(k,q)† = g(k+q,−q). EPC inference precision is decoupled from the recorded
+   training dtype: float32 checkpoints are promoted to the EPC dtype
+   (double by default) at load time.
 4. Fold back by translational invariance: supercell block between cells
    (p_i, p_j) with κ displaced in the home cell → ∂H_{i(0), j(p_j − p_i)} /
    ∂τ_{κ(−p_i), α} (p reduced mod n_grid; exact for commensurate q).
@@ -79,7 +85,10 @@ g_ijκα(k, q) = Σ_p e^{2πi q·p} Σ_R e^{2πi k·R} [∂H(p, R)]_ij,
 
 evaluated on uniform k- and q-grids from the config (q-grid = supercell grid).
 Output is dense complex, shape `[nk, nq, n_displaced_atoms, 3, norb, norb]`,
-stored as separate real and imaginary arrays.
+stored as separate real and imaginary arrays. The writer streams one q-point
+slab at a time into chunked HDF5 datasets, so peak memory is bounded by
+`nk × n_displaced × 3 × norb²` rather than the full tensor; the estimated
+on-disk size is printed before writing.
 
 ## Inputs
 

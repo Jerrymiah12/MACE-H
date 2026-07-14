@@ -63,6 +63,31 @@ ${python_path} $MACEH_DIR/inference_tools/Band.py -args
 
 The more detailed specification can be found in the example bash file in [Zenodo](). Here, we also suggested that we use another json file called SI.json (check ./inference_tools/SI.json as an example) specifying the number of valence orbitals and k-path for band structure, since the default number of orbitals in this regards are not always correct without knowing the exact potential files of the elements. 
 
+### Electron-phonon coupling (Cartesian AO basis)
+
+Given a trained model and a structure (lat.dat, element.dat, site_positions.dat), you can
+compute the Cartesian atomic-orbital electron-phonon coupling
+
+g_ij,ka(k, q) = [dH(k, q) / dtau_ka]_ij
+
+on uniform k/q grids with
+
+```
+${python_path} ./deephe3-epc.py ./configs/epc.ini
+```
+
+The Hamiltonian derivatives dH/dtau are obtained by central finite differences of the
+model prediction on a supercell commensurate with the q-grid (the supercell graph is
+built once; only the edge vectors are recomputed for each displacement), folded back to
+cell-resolved dH_ij(R)/dtau_ka(p) and Fourier transformed. Results are written to
+`<output_dir>/<stru_id>/epc_cartesian_pred.h5` (complex g stored as g_real/g_imag with
+shape [nk, nq, natoms, 3, norb, norb], plus grids and structure metadata).
+
+This output is the electronic perturbation before contraction with phonon eigenvectors
+and before transformation to band eigenstates; those steps (which need phonon data,
+electronic eigenvectors, and in the non-orthogonal NAO basis possibly dS/dtau handling)
+are downstream postprocessing.
+
 ## Citation
 
 ```

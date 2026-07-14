@@ -61,3 +61,36 @@ def test_write_epc_cartesian_h5(tmp_path):
         assert np.allclose(f['supercell_matrix'][()], np.diag([2, 1, 1]))
         assert f['finite_difference_delta'][()] == pytest.approx(0.01)
         assert f.attrs['units'] == 'g in eV/Angstrom'
+        assert 'dH' not in f
+    assert not (tmp_path / 'epc_cartesian_pred.h5.tmp').exists()
+
+
+def test_write_epc_cartesian_h5_saves_derivatives(tmp_path):
+    deriv = make_deriv()
+    struct = Structure(positions=np.array([[0.0, 0.0, 0.0]]),
+                       lattice=3.0 * np.eye(3),
+                       numbers=np.array([79]))
+    path = str(tmp_path / 'epc_cartesian_pred.h5')
+    write_epc_cartesian_h5(path, struct, deriv, np.zeros((1, 3)), np.zeros((1, 3)),
+                           {'units': 'g in eV/Angstrom'}, save_derivatives=True)
+    with h5py.File(path, 'r') as f:
+        assert f['dH/0/x/[0, 0, 0, 0, 0, 0]'][()] == pytest.approx(1.0)
+        assert f['dH/0/x/[1, 0, 0, 2, 0, 0]'][()] == pytest.approx(0.5)
+
+
+def test_write_epc_cartesian_h5_failure_leaves_no_partial_file(tmp_path):
+    deriv = make_deriv()
+    struct = Structure(positions=np.array([[0.0, 0.0, 0.0]]),
+                       lattice=3.0 * np.eye(3),
+                       numbers=np.array([79]))
+    path = str(tmp_path / 'epc_cartesian_pred.h5')
+    # an existing result must survive a failed rewrite
+    with h5py.File(path, 'w') as f:
+        f['sentinel'] = 1
+    with pytest.raises(TypeError):
+        # dict attrs cannot be stored by h5py -> write fails mid-file
+        write_epc_cartesian_h5(path, struct, deriv, np.zeros((1, 3)), np.zeros((1, 3)),
+                               {'bad': {'nested': 'dict'}})
+    with h5py.File(path, 'r') as f:
+        assert f['sentinel'][()] == 1
+    assert not (tmp_path / 'epc_cartesian_pred.h5.tmp').exists()

@@ -4,7 +4,6 @@ import warnings
 
 import numpy as np
 import torch
-import h5py
 
 from ..kernel import DeepHE3Kernel, NetOutInfo
 from ..graph import Collater, get_edge_fea
@@ -75,10 +74,11 @@ def make_predict_fn(contexts, data, config, debug=False):
             kernel.update_hopping(H, H_pred, batch.x.cpu(), batch.edge_index.cpu(),
                                   batch.edge_key.cpu(), debug=debug)
         if not debug:
-            msg = ('Some orbitals are not predicted. You can include option --debug to '
-                   'fill unpredicted matrix elements with 0.')
+            msg = ('Nonfinite prediction: NaN means some orbitals are not predicted '
+                   '(option --debug fills them with 0); inf means the model itself '
+                   'produced nonfinite output.')
             for hopping in H.values():
-                assert not np.isnan(hopping).any(), msg
+                assert np.isfinite(hopping).all(), msg
         # differentiate the same symmetrized Hamiltonian the band postprocessing uses
         return hermitize_blocks(H)
 
@@ -163,10 +163,6 @@ def run_epc(config_path, debug=False):
         note='Cartesian AO coupling g_ij,ka(k,q) = [dH(k,q)/dtau_ka]_ij; phonon-mode '
              'contraction and band transformation (incl. possible dS/dtau handling) '
              'are left for downstream postprocessing',
-        date=time.strftime('%Y-%m-%d %H:%M:%S')))
-    if config.save_derivatives:
-        with h5py.File(out_path, 'a') as f:
-            for (kappa, alpha), by_pR in deriv.blocks.items():
-                for (p, R), m in by_pR.items():
-                    f[f'dH/{kappa}/{"xyz"[alpha]}/{str(list(p) + list(R))}'] = m
+        date=time.strftime('%Y-%m-%d %H:%M:%S')),
+                           save_derivatives=config.save_derivatives)
     print(f'\nEPC written to "{out_path}"')

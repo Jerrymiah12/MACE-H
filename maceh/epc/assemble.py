@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import h5py
 
@@ -35,10 +37,13 @@ def compute_epc_cartesian(deriv, kpts, qpts):
     return dict(g=g, atom_indices=displaced, kpoints=kpts, qpoints=qpts)
 
 
-def write_epc_cartesian_h5(path, struct, deriv, kpts, qpts, attrs):
+def write_epc_cartesian_h5(path, struct, deriv, kpts, qpts, attrs,
+                           save_derivatives=False):
     r''' compute g and write epc_cartesian_pred.h5, streaming one q-point at a
     time into chunked g_real/g_imag datasets so peak memory is one q-slab
-    instead of the full (nk, nq, ...) tensor '''
+    instead of the full (nk, nq, ...) tensor. The file is written to <path>.tmp
+    and atomically renamed on success, so an interrupted or failed write never
+    clobbers a previous result with a truncated file. '''
     kpts = np.asarray(kpts, dtype=np.float64)
     qpts = np.asarray(qpts, dtype=np.float64)
     displaced = displaced_atoms(deriv)
@@ -48,22 +53,33 @@ def write_epc_cartesian_h5(path, struct, deriv, kpts, qpts, attrs):
     print(f'Writing g_real/g_imag of shape {shape} (~{size_gib:.2f} GiB on disk)')
     norb_per_atom = np.diff(deriv.norb_cumsum)
     orbital_indices = np.repeat(np.arange(deriv.n_uc_atoms), norb_per_atom)
-    with h5py.File(path, 'w') as f:
-        g_real = f.create_dataset('g_real', shape=shape, dtype=np.float64, chunks=True)
-        g_imag = f.create_dataset('g_imag', shape=shape, dtype=np.float64, chunks=True)
-        for iq, q in enumerate(qpts):
-            slab = compute_q_slab(deriv, kpts, q, displaced)
-            g_real[:, iq] = slab.real
-            g_imag[:, iq] = slab.imag
-        f['kpoints'] = kpts
-        f['qpoints'] = qpts
-        f['atomic_numbers'] = np.asarray(struct.numbers, dtype=int)
-        f['atom_indices'] = displaced
-        f['cartesian_directions'] = np.array([b'x', b'y', b'z'])
-        f['orbital_indices'] = orbital_indices
-        f['lattice'] = struct.lattice
-        f['positions'] = struct.positions
-        f['supercell_matrix'] = np.diag(deriv.n_grid)
-        f['finite_difference_delta'] = deriv.delta
-        for k, v in attrs.items():
-            f.attrs[k] = v
+    tmp_path = path + '.tmp'
+    try:
+        with h5py.File(tmp_path, 'w') as f:
+            g_real = f.create_dataset('g_real', shape=shape, dtype=np.float64, chunks=True)
+            g_imag = f.create_dataset('g_imag', shape=shape, dtype=np.float64, chunks=True)
+            for iq, q in enumerate(qpts):
+                slab = compute_q_slab(deriv, kpts, q, displaced)
+                g_real[:, iq] = slab.real
+                g_imag[:, iq] = slab.imag
+            f['kpoints'] = kpts
+            f['qpoints'] = qpts
+            f['atomic_numbers'] = np.asarray(struct.numbers, dtype=int)
+            f['atom_indices'] = displaced
+            f['cartesian_directions'] = np.array([b'x', b'y', b'z'])
+            f['orbital_indices'] = orbital_indices
+            f['lattice'] = struct.lattice
+            f['positions'] = struct.positions
+            f['supercell_matrix'] = np.diag(deriv.n_grid)
+            f['finite_difference_delta'] = deriv.delta
+            for k, v in attrs.items():
+                f.attrs[k] = v
+            if save_derivatives:
+                for (kappa, alpha), by_pR in deriv.blocks.items():
+                    for (p, R), m in by_pR.items():
+                        f[f'dH/{kappa}/{"xyz"[alpha]}/{str(list(p) + list(R))}'] = m
+        os.replace(tmp_path, path)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise

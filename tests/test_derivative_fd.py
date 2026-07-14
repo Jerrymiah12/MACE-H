@@ -87,6 +87,21 @@ def test_atom_indices_out_of_range_rejected():
                           atom_indices=[1])
 
 
+def test_nonfinite_prediction_rejected():
+    # an inf prediction turns into a NaN central difference (inf - inf); it must
+    # raise instead of silently passing the grad_threshold filter
+    def bad_predict_fn(positions):
+        H = predict_fn(positions)
+        H[str(KEYS[2])] = np.array([[np.inf]])
+        return H
+
+    smap = SupercellMap((2, 1, 1), n_uc_atoms=1)
+    pos0 = torch.tensor([[0.0, 0.0, 0.0], [A, 0.0, 0.0]], dtype=torch.float64)
+    with np.errstate(invalid='ignore'):  # inf - inf inside is the point of the test
+        with pytest.raises(AssertionError, match='nonfinite'):
+            finite_difference(bad_predict_fn, pos0, smap, np.array([0, 1]), delta=1e-4)
+
+
 def test_delta_zero_rejected():
     smap = SupercellMap((2, 1, 1), n_uc_atoms=1)
     pos0 = torch.tensor([[0.0, 0.0, 0.0], [A, 0.0, 0.0]], dtype=torch.float64)

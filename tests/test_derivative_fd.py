@@ -98,7 +98,7 @@ def test_nonfinite_prediction_rejected():
     smap = SupercellMap((2, 1, 1), n_uc_atoms=1)
     pos0 = torch.tensor([[0.0, 0.0, 0.0], [A, 0.0, 0.0]], dtype=torch.float64)
     with np.errstate(invalid='ignore'):  # inf - inf inside is the point of the test
-        with pytest.raises(AssertionError, match='nonfinite'):
+        with pytest.raises(FloatingPointError, match='nonfinite'):
             finite_difference(bad_predict_fn, pos0, smap, np.array([0, 1]), delta=1e-4)
 
 

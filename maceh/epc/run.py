@@ -78,7 +78,9 @@ def make_predict_fn(contexts, data, config, debug=False):
                    '(option --debug fills them with 0); inf means the model itself '
                    'produced nonfinite output.')
             for hopping in H.values():
-                assert np.isfinite(hopping).all(), msg
+                # explicit raise, not assert: must survive python -O
+                if not np.isfinite(hopping).all():
+                    raise ValueError(msg)
         # differentiate the same symmetrized Hamiltonian the band postprocessing uses
         return hermitize_blocks(H)
 

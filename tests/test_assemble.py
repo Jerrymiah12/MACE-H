@@ -62,7 +62,7 @@ def test_write_epc_cartesian_h5(tmp_path):
         assert f['finite_difference_delta'][()] == pytest.approx(0.01)
         assert f.attrs['units'] == 'g in eV/Angstrom'
         assert 'dH' not in f
-    assert not (tmp_path / 'epc_cartesian_pred.h5.tmp').exists()
+    assert list(tmp_path.glob('*.tmp')) == []
 
 
 def test_write_epc_cartesian_h5_saves_derivatives(tmp_path):
@@ -93,4 +93,4 @@ def test_write_epc_cartesian_h5_failure_leaves_no_partial_file(tmp_path):
                                {'bad': {'nested': 'dict'}})
     with h5py.File(path, 'r') as f:
         assert f['sentinel'][()] == 1
-    assert not (tmp_path / 'epc_cartesian_pred.h5.tmp').exists()
+    assert list(tmp_path.glob('*.tmp')) == []

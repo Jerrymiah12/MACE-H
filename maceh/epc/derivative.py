@@ -86,9 +86,11 @@ def finite_difference(predict_fn, positions0, smap, norb_cumsum, delta,
             out = {}
             for key_str, hp in H_plus.items():
                 d = (np.asarray(hp) - np.asarray(H_minus[key_str])) / (2.0 * delta)
-                assert np.isfinite(d).all(), \
-                    f'nonfinite derivative for hopping {key_str} (atom {kappa}, ' \
-                    f'direction {"xyz"[alpha]}): the model produced nonfinite output'
+                # explicit raise, not assert: must survive python -O
+                if not np.isfinite(d).all():
+                    raise FloatingPointError(
+                        f'nonfinite derivative for hopping {key_str} (atom {kappa}, '
+                        f'direction {"xyz"[alpha]}): the model produced nonfinite output')
                 if np.abs(d).max() < grad_threshold:
                     continue
                 p, R, i, j = fold_key(json.loads(key_str), smap)

@@ -1,4 +1,5 @@
 import os
+import tempfile
 
 import numpy as np
 import h5py
@@ -41,19 +42,30 @@ def write_epc_cartesian_h5(path, struct, deriv, kpts, qpts, attrs,
                            save_derivatives=False):
     r''' compute g and write epc_cartesian_pred.h5, streaming one q-point at a
     time into chunked g_real/g_imag datasets so peak memory is one q-slab
-    instead of the full (nk, nq, ...) tensor. The file is written to <path>.tmp
-    and atomically renamed on success, so an interrupted or failed write never
-    clobbers a previous result with a truncated file. '''
+    instead of the full (nk, nq, ...) tensor. The file is written to a unique
+    temporary file next to path and atomically renamed on success, so an
+    interrupted, failed or concurrent write never clobbers a previous result
+    with a truncated file. '''
     kpts = np.asarray(kpts, dtype=np.float64)
     qpts = np.asarray(qpts, dtype=np.float64)
     displaced = displaced_atoms(deriv)
     norb = deriv.norb_tot
     shape = (len(kpts), len(qpts), len(displaced), 3, norb, norb)
-    size_gib = 2 * float(np.prod(shape)) * 8 / 1024 ** 3
-    print(f'Writing g_real/g_imag of shape {shape} (~{size_gib:.2f} GiB on disk)')
+    size_bytes = 2 * float(np.prod(shape)) * 8
+    if save_derivatives:
+        size_bytes += sum(m.nbytes for by_pR in deriv.blocks.values()
+                          for m in by_pR.values())
+    print(f'Writing g_real/g_imag of shape {shape}'
+          f'{" plus dH derivatives" if save_derivatives else ""}'
+          f' (~{size_bytes / 1024 ** 3:.2f} GiB on disk)')
     norb_per_atom = np.diff(deriv.norb_cumsum)
     orbital_indices = np.repeat(np.arange(deriv.n_uc_atoms), norb_per_atom)
-    tmp_path = path + '.tmp'
+    # unique temp name in the destination directory: concurrent jobs writing the
+    # same path must not truncate or delete each other's in-progress file, and
+    # os.replace stays atomic only within one filesystem
+    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)),
+                                    prefix=os.path.basename(path) + '.', suffix='.tmp')
+    os.close(fd)
     try:
         with h5py.File(tmp_path, 'w') as f:
             g_real = f.create_dataset('g_real', shape=shape, dtype=np.float64, chunks=True)

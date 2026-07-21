@@ -39,7 +39,7 @@
 - Consumes: nothing (first task).
 - Produces: `mgo_lr.__version__: str`; `constants.BOHR_TO_ANGSTROM, ANGSTROM_TO_BOHR, RY_TO_EV, C_COUL, LR_SIGN`; `config.load_config(path: str) -> dict`, `config.require(cfg: dict, dotted: str)`, `config.save_resolved(cfg: dict, workspace: str, stage: str) -> str`, `config.atomic_write_text(path: str, text: str)`; `__main__.main(argv: list[str]) -> int` and `STAGES: dict[str, tuple[str, str]]` mapping stage name → `(module, function)`; every stage function has signature `stage(cfg: dict, workspace: str, args: argparse.Namespace) -> int`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_config.py
@@ -112,12 +112,12 @@ def test_cli_help_lists_stages():
     assert "gen-structures" in r.stdout
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd /Users/jb/MACE-H && /opt/anaconda3/envs/DeepH/bin/python -m pytest mgo_lr/tests/test_config.py -q`
 Expected: collection error / ModuleNotFoundError `mgo_lr`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `mgo_lr/__init__.py`:
 
@@ -363,12 +363,12 @@ slurm:
 
 Also create the empty test package marker: `mgo_lr/tests/__init__.py` (empty file).
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd /Users/jb/MACE-H && /opt/anaconda3/envs/DeepH/bin/python -m pytest mgo_lr/tests/test_config.py -q`
 Expected: all pass (7 tests). Note: `test_cli_help_lists_stages` passes because argparse lists choices in help before any stage module is imported.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr && git commit -m "feat(mgo_lr): package skeleton, constants, config loader, CLI dispatcher"
@@ -386,7 +386,7 @@ git add mgo_lr && git commit -m "feat(mgo_lr): package skeleton, constants, conf
 - Consumes: `config.atomic_write_text`.
 - Produces: `snapshot.STATES = ["prepared", "dft_done", "converted", "lr_done", "validated", "rejected"]`; `class SnapshotStore(workspace: str, set_name: str)` with attributes `.set_dir`, `.rejected_dir` and methods `.folder(sid) -> str`, `.list() -> list[str]`, `.read_status(sid) -> dict`, `.write_status(sid, state, **extra)`, `.reject(sid, reason: str)`, `.state_at_least(sid, state) -> bool`; `set_dir_name(set_name) -> str` (`pilot`→`pilot`, `main`→`main`, `large`→`test_large_cell`); `status_stage(cfg, workspace, args) -> int` printing per-set state counts.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_snapshot.py
@@ -453,11 +453,11 @@ def test_status_stage_runs(tmp_path, capsys):
     assert "pilot" in capsys.readouterr().out
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_snapshot.py -q` → ModuleNotFoundError `mgo_lr.snapshot`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # mgo_lr/snapshot.py
@@ -543,11 +543,11 @@ def status_stage(cfg, workspace, args):
     return 0
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_snapshot.py mgo_lr/tests/test_config.py -q` → all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/snapshot.py mgo_lr/tests/test_snapshot.py
@@ -566,7 +566,7 @@ git commit -m "feat(mgo_lr): snapshot state machine and status stage"
 - Consumes: nothing new.
 - Produces: `structures.rocksalt_primitive(a: float) -> tuple[np.ndarray (3,3), np.ndarray (2,3), list[str]]` (cell rows = lattice vectors Å; fractional positions; species `["Mg","O"]`); `@dataclass Supercell: cell (3,3), cart (N,3), species (list[str]), cell_index (N,3 int), basis_index (N,) int` with **species-major, cell-minor atom ordering** (all Mg first, then all O; within a species, unit cells in `np.ndindex(n,n,n)` order); `structures.make_supercell(cell, frac, species, n: int) -> Supercell`; `structures.reciprocal(cell) -> np.ndarray (3,3)` (rows `b_i`, includes 2π).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_structures.py
@@ -609,11 +609,11 @@ def test_reciprocal():
     assert np.allclose(rec @ cell.T, 2 * np.pi * np.eye(3), atol=1e-12)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_structures.py -q` → ModuleNotFoundError.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # mgo_lr/structures.py
@@ -664,11 +664,11 @@ def reciprocal(cell):
     return 2.0 * np.pi * np.linalg.inv(np.asarray(cell, float)).T
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_structures.py -q` → 3 pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/structures.py mgo_lr/tests/test_structures.py
@@ -687,7 +687,7 @@ git commit -m "feat(mgo_lr): rocksalt primitive and supercell builder"
 - Consumes: `constants.ANGSTROM_TO_BOHR`, `config.atomic_write_text`.
 - Produces: `abacus_io.write_stru(path, cell, cart, species, cfg)` (groups atoms by species **in `cfg["material"]["species"]` order**, positions written `Direct`; raises if `species` is not already species-major in that order — atom ordering must match the matrices); `abacus_io.write_input(path, cfg, **overrides)` (always `gamma_only 0`, `symmetry 0`; raises on `gamma_only` override ≠ 0); `abacus_io.write_kpt(path, mesh: list[int])`; `abacus_io.write_job_script(path, cfg, snapshot_dirs: list[str])`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_abacus_writers.py
@@ -764,11 +764,11 @@ def test_write_job_script(tmp_path):
     assert "snapshot_000001" in text
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_abacus_writers.py -q` → ModuleNotFoundError.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # mgo_lr/abacus_io.py
@@ -858,11 +858,11 @@ def write_job_script(path, cfg, snapshot_dirs):
     atomic_write_text(path, "\n".join(body) + "\n")
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_abacus_writers.py -q` → 5 pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/abacus_io.py mgo_lr/tests/test_abacus_writers.py
@@ -881,7 +881,7 @@ git commit -m "feat(mgo_lr): ABACUS STRU/INPUT/KPT/job writers"
 - Consumes: `structures.Supercell`, `structures.reciprocal`.
 - Produces: `displacements.MODE_NORMALIZATION = "max_species_weight_1"`; `apply_pattern(sc: Supercell, prim_cell: np.ndarray, pattern: dict, global_seed: int) -> np.ndarray (N,3)`; `remove_uniform_translation(u) -> np.ndarray` (plain mean, not mass-weighted); `minimum_distance(cell, cart) -> float`; `build_pilot(cfg, prim_cell) -> list[dict]`, `build_main(cfg, prim_cell) -> list[dict]`, `build_large(cfg, prim_cell) -> list[dict]` — each plan dict is `{"sid": "snapshot_%06d", "pattern": {...}, "metadata": {...}}` where `metadata` is the exact `displacement_metadata.json` content (spec schema). Pattern dicts are JSON-serializable: `{"pattern_class": str, "modes": [mode...], "random": {"index": int, "amplitude": float}|absent, "translation": [x,y,z]|absent}` and each mode is `{"q_int": [i,j,k], "amplitude": float (signed), "phase": float, "polarization": [x,y,z], "polarization_class": "longitudinal"|"transverse"|"none", "species_weights": {"Mg": w, "O": w}}`. The stage function `gen_structures_stage` is added in Task 6.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_displacements.py
@@ -1042,11 +1042,11 @@ def test_build_large():
             assert abs(a) <= max(CFG["displacements"]["amplitudes"]) + 1e-12
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_displacements.py -q` → ModuleNotFoundError `mgo_lr.displacements`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # mgo_lr/displacements.py
@@ -1384,11 +1384,11 @@ def build_large(cfg, prim_cell):
     return plans
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_displacements.py -q` → 11 pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/displacements.py mgo_lr/tests/test_displacements.py
@@ -1408,7 +1408,7 @@ git commit -m "feat(mgo_lr): displacement-pattern engine (pilot/main/large build
 - Consumes: Task 5 builders, `abacus_io` writers, `SnapshotStore`, `make_supercell`.
 - Produces: `snapshot.load_reference(workspace: str) -> dict` with keys `prim_cell (3,3 float Å)`, `frac (2,3 float)`, `atomic_numbers (2,) int`, `species (list[str])` — read from `<workspace>/reference/{reference_cell.npy, reference_positions.npy, atomic_numbers.npy, species_order.json}`, raising `FileNotFoundError` naming the missing files. `displacements.gen_structures_stage(cfg, workspace, args) -> int` writing, per snapshot: `STRU`, `INPUT` (scf + `out_mat_hs2 1`), `KPT`, `displacements.npy` (N×3 Cartesian Å), `displacement_metadata.json` (metadata + the pattern dict under key `"pattern"`), `status.json` state `prepared`; plus `job_abacus.sh` at the set dir. Reference-artifact *files* are the contract between this task and Task 10 (which writes them in production; tests fabricate them).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_gen_structures.py
@@ -1514,11 +1514,11 @@ def test_cli_requires_reference(tmp_path):
     assert r.returncode != 0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_gen_structures.py -q` → ImportError `load_reference`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `mgo_lr/snapshot.py`:
 
@@ -1611,11 +1611,11 @@ def gen_structures_stage(cfg, workspace, args):
     return 0
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_gen_structures.py mgo_lr/tests/test_displacements.py -q` → all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/snapshot.py mgo_lr/displacements.py mgo_lr/tests/test_gen_structures.py
@@ -1636,7 +1636,7 @@ git commit -m "feat(mgo_lr): gen-structures stage and reference loader"
 - Consumes: `snapshot.load_reference`, `config.atomic_write_text`.
 - Produces: `dfpt.write_pw_input(path, cfg, cell, frac, species)`, `dfpt.write_ph_input(path, cfg)` (both `epsil = .true.` and `trans = .true.` explicit), `dfpt.init_dfpt_stage(cfg, workspace, args) -> int` writing `<workspace>/reference/qe/{pw.in, ph.in, job_qe.sh}` at the relaxed reference geometry. `collect_dfpt_stage` is Task 8.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_dfpt_inputs.py
@@ -1678,11 +1678,11 @@ def test_init_dfpt_stage(tmp_path):
     assert CFG["qe"]["pw_command"] in job and CFG["qe"]["ph_command"] in job
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_dfpt_inputs.py -q` → ModuleNotFoundError `mgo_lr.dfpt` (and KeyError for `qe.pw_command` once the module exists).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 In `mgo_lr/config.py`, extend the `REQUIRED` qe line:
 
@@ -1769,11 +1769,11 @@ def init_dfpt_stage(cfg, workspace, args):
     return 0
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_dfpt_inputs.py mgo_lr/tests/test_config.py -q` → all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/dfpt.py mgo_lr/config.py mgo_lr/configs/mgo.yaml mgo_lr/tests/test_dfpt_inputs.py
@@ -1794,7 +1794,7 @@ git commit -m "feat(mgo_lr): QE pw.x/ph.x input writers and init-dfpt stage"
 - Consumes: Task 7's `dfpt.py`, `snapshot.load_reference`.
 - Produces: `dfpt.parse_ph_output(text: str) -> (eps (3,3), zstar (n_atom,3,3), labels list[str])` reading the **(d Force / dE)** Born block (rows in printed Ex/Ey/Ez order) and ignoring any later `(d P / du)` block; `dfpt.apply_asr(zstar) -> np.ndarray` (`Z̃*_κ = Z*_κ − mean_κ' Z*_κ'`); `dfpt.collect_dfpt_stage(cfg, workspace, args) -> int` writing `<workspace>/reference/{born_effective_charges.npy [2,3,3], dielectric_infinity.npy [3,3], qe_dfpt_output.out, dfpt_checks.json}`. Hard failures (SystemExit): missing blocks, wrong atom count/order, non-3×3 tensors, ε∞ not positive-definite, wrong Z* diagonal signs. Warnings (recorded in `dfpt_checks.json`): raw ASR violation > `dfpt.zstar_sum_warn`, anisotropy > `dfpt.isotropy_warn`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_dfpt_collect.py
@@ -1898,11 +1898,11 @@ def test_collect_dfpt_sign_flip_fails(tmp_path):
         dfpt.collect_dfpt_stage(CFG, ws, Args())
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_dfpt_collect.py -q` → AttributeError `parse_ph_output`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 In `mgo_lr/config.py` `REQUIRED`, add after the `qe.` lines:
 
@@ -2030,11 +2030,11 @@ def collect_dfpt_stage(cfg, workspace, args):
     return 0
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_dfpt_collect.py -q` → 5 pass. Fix the loose `test_apply_asr_exact` third assertion if the tolerance math is off — the essential assertions are the first two (exact ASR).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/dfpt.py mgo_lr/config.py mgo_lr/configs/mgo.yaml mgo_lr/tests/test_dfpt_collect.py
@@ -2053,7 +2053,7 @@ git commit -m "feat(mgo_lr): ph.x parser, ASR correction, collect-dfpt stage"
 - Consumes: Task 4's `abacus_io.py`, `constants.BOHR_TO_ANGSTROM`.
 - Produces: `abacus_io.parse_running_scf(path) -> {"converged": bool, "etot_ev": float|None, "fermi_ev": float|None}`; `abacus_io.parse_csr(path) -> (dim: int, {(Rx,Ry,Rz): scipy.sparse.csr_matrix})` handling the optional ABACUS ≥3.0 `STEP: 0` first line and raising ValueError on NaN/Inf, duplicate R, or malformed blocks; `abacus_io.parse_stru(path) -> (cell (3,3) Å, cart (N,3) Å, species list[str])` (round-trips `write_stru` output and ABACUS `STRU_ION_D`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_abacus_parsers.py
@@ -2156,11 +2156,11 @@ def test_parse_stru_roundtrip(tmp_path):
     assert species2 == sc.species
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_abacus_parsers.py -q` → AttributeError `parse_running_scf`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `mgo_lr/abacus_io.py` (update the module docstring's "Task 9" note to say parsers live below; add `import re` and `from .constants import BOHR_TO_ANGSTROM` to the imports):
 
@@ -2264,11 +2264,11 @@ def parse_stru(path):
     return cell, np.asarray(frac, float) @ cell, species
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_abacus_parsers.py mgo_lr/tests/test_abacus_writers.py -q` → all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/abacus_io.py mgo_lr/tests/test_abacus_parsers.py
@@ -2288,7 +2288,7 @@ git commit -m "feat(mgo_lr): ABACUS SCF-log, CSR and STRU parsers"
 - Consumes: `structures.rocksalt_primitive`, `abacus_io.write_stru/write_input/write_kpt/parse_stru/parse_running_scf`, `config.atomic_write_text`.
 - Produces: `reference.init_reference_stage(cfg, workspace, args) -> int` writing decks under `<workspace>/reference/abacus/`: `ecut_<E>/` per `reference.ecut_scan` value, `kmesh_<k1>x<k2>x<k3>/` per `reference.kmesh_scan` mesh, `cell_relax/`, `final_scf/` (with `out_mat_hs2 1`), each with STRU/INPUT/KPT. `reference.collect_reference_stage(cfg, workspace, args) -> int`: relaxed lattice constant from `material.lattice_constant_relaxed` config override if set, else parsed from `cell_relax/OUT.MgO/STRU_ION_D`; writes `reference/{reference_cell.npy, reference_positions.npy, atomic_numbers.npy, species_order.json, orbital_types.dat (one line per atom), primitive.cif, dft_settings.yaml, scan_summary.json}` and regenerates `final_scf/STRU` at the relaxed geometry. `reference.lattice_constant_from_cell(cell) -> float` (a = |v₀|·√2 for the fcc primitive cell, cubic-symmetry checked).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_reference.py
@@ -2393,11 +2393,11 @@ def test_collect_reference_no_relax_no_override_fails(tmp_path):
         reference.collect_reference_stage(CFG, ws, Args())
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_reference.py -q` → ModuleNotFoundError `mgo_lr.reference`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `mgo_lr/constants.py`:
 
@@ -2546,11 +2546,11 @@ def collect_reference_stage(cfg, workspace, args):
     return 0
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_reference.py -q` → 6 pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/reference.py mgo_lr/constants.py mgo_lr/tests/test_reference.py
@@ -2578,7 +2578,7 @@ U[2] = eye(5)[[0, 3, 4, 1, 2]]  then rows [3, 4] *= -1
 U[3] = eye(7)             then rows [1, 2, 5, 6] *= -1
 ```
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_orbital_reorder.py
@@ -2636,11 +2636,11 @@ def test_transform_involution_via_orthogonality():
     assert np.allclose(u.T @ t @ u, a)       # U^T (U a U^T) U = a
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_orbital_reorder.py -q` → ModuleNotFoundError `mgo_lr.convert`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # mgo_lr/convert.py
@@ -2685,11 +2685,11 @@ def transform_block(mat, l_left, l_right):
     return atom_u(l_left) @ np.asarray(mat, float) @ atom_u(l_right).T
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_orbital_reorder.py -q` → 6 pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/convert.py mgo_lr/tests/test_orbital_reorder.py
@@ -2709,7 +2709,7 @@ git commit -m "feat(mgo_lr): ABACUS->DeepH-E3 orbital reorder transform (DeepH-p
 - Consumes: Task 9 parsers, Task 11 transform, `constants.RY_TO_EV/ATOMIC_NUMBERS`, `SnapshotStore`, `load_reference`, `make_supercell`.
 - Produces: `config.sha256_file(path) -> str`; in `convert.py`: `BLOCK_SKIP_THRESHOLD = 1e-8` (same sparsity cutoff as DeepH-pack); `key_str(R, i, j) -> str` (i, j **0-based in, 1-based out**: `"[Rx, Ry, Rz, i+1, j+1]"`); `parse_key(k) -> (Rx,Ry,Rz,i,j)` (returns the stored 1-based i, j); `write_blocks(path, blocks: dict[str, np.ndarray])` (atomic h5); `read_blocks(path) -> dict[str, np.ndarray]`; `species_orbital_info(cfg, species_list) -> (types per atom, norb per atom, offsets (N+1,))`; `matrices_to_blocks(csr_blocks, dim, cfg, species_list, factor) -> dict[str, np.ndarray]` (slice → skip-threshold → reorder-transform → × factor); `write_structure_files(folder, cell, cart, species, cfg, fermi_ev)` writing `lat.dat`/`rlat.dat` (3×3, vectors as **columns**, `rlat` includes 2π), `site_positions.dat` (3×N), `element.dat`, `orbital_types.dat` (one line per atom), `info.json` (`nsites`, `isorthogonal`, `isspinful`, `norbits`, `fermi_level`); `collect_dft_stage(cfg, workspace, args) -> int`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_convert.py
@@ -2883,11 +2883,11 @@ def test_collect_dft_rejects_unconverged(tmp_path):
     assert st["reason"] == "scf_not_converged"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_convert.py -q` → ImportError `sha256_file`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `mgo_lr/config.py`:
 
@@ -3070,11 +3070,11 @@ def collect_dft_stage(cfg, workspace, args):
     return exit_code
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_convert.py mgo_lr/tests/test_orbital_reorder.py -q` → all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/convert.py mgo_lr/config.py mgo_lr/tests/test_convert.py
@@ -3093,7 +3093,7 @@ git commit -m "feat(mgo_lr): DeepH-E3 format conversion and collect-dft stage"
 - Consumes: `constants.C_COUL/LR_SIGN`, `displacements.remove_uniform_translation`, `convert.parse_key/key_str`.
 - Produces: `lr.gmax_squared(lam, tol) -> float` (`4λ²ln(1/tol)`, the bound on `G·ε∞·G`); `lr.reciprocal_set(rec_cell, eps, gmax_sq) -> (n_int (M,3) int, g_cart (M,3))`; `lr.check_reciprocal_set(n_int) -> dict` with keys `number_of_vectors, excludes_G_zero, no_duplicates, inversion_symmetric, ok`; `lr.lr_coefficients(g_cart, dipoles (N,3), ref_positions (N,3), eps, lam, volume) -> np.ndarray complex (M,)` (reference-position phase `e^{−iG·R⁰}`, `V(G) = LR_SIGN · φ(G)` with `φ(G) = −i(4π/Ω)C_COUL(Σ G·d e^{−iG·R⁰})/(G·ε·G)·f_Ewald`); `lr.evaluate_potential(g_cart, coeffs, points) -> np.ndarray complex (N,)` (`Σ_G V(G)e^{+iG·r}`); `lr.imaginary_residual(v, delta) -> float`; `lr.minimum_image_displacements(cell, cart, ref_cart) -> (N,3)`; `lr.assemble_lr_hamiltonian(overlap_blocks: dict, v_atom (N,) real) -> dict` (`H^LR_ij(R) = (V_i+V_j)/2 · S_ij(R)` over every stored overlap key); `lr.blocks_norm(d) -> float`, `lr.blocks_diff_norm(a, b) -> float` (Frobenius over the union of keys, absent blocks zero).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_lr_core.py
@@ -3270,11 +3270,11 @@ def test_assemble_and_hermiticity_and_small_amplitude():
     assert e_linear(0.005) < e_linear(0.01) < e_linear(0.02)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_lr_core.py -q` → ModuleNotFoundError `mgo_lr.lr`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # mgo_lr/lr.py
@@ -3406,11 +3406,11 @@ def blocks_diff_norm(a, b):
     return float(np.sqrt(tot))
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_lr_core.py -q` → 9 pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/lr.py mgo_lr/tests/test_lr_core.py
@@ -3429,7 +3429,7 @@ git commit -m "feat(mgo_lr): LR core (reciprocal set, screened dipole potential,
 - Consumes: Task 13 core, `convert.read_blocks/write_blocks`, `SnapshotStore`, `load_reference`, `make_supercell`, `displacements.remove_uniform_translation`.
 - Produces: `lr.lr_process_stage(cfg, workspace, args) -> int`. Per snapshot ≥ `converted`: recomputes `u` by minimum image from `site_positions.dat` vs the rebuilt reference supercell (warns if it disagrees with `displacements.npy` by > 1e-6 Å), removes uniform translation **inside the processor**, forms dipoles with the ASR-corrected Born charges, builds 𝒢 (hard-fails the whole stage if `check_reciprocal_set` fails), evaluates `V^LR` at the **snapshot** positions, applies the imaginary-residual hard gate (on failure: writes `lr_failure.json` with reciprocal-set diagnostics, sets `lr_failed` in status, writes **no** LR/SR labels, exit 1), writes `hamiltonians_lr.h5` + `hamiltonians_sr.h5` (atomic), `lr_metadata.json` (the spec's `lr_definition` block + `r_imag` + `lr_convergence` from the `convergence_factor`-scaled G set), merges `lr_definition` into `<workspace>/metadata.yaml` refusing to mix definitions, sets state `lr_done`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_lr_process.py
@@ -3558,11 +3558,11 @@ def test_lr_process_imaginary_gate(tmp_path, monkeypatch):
     assert "lr_failed" in store.read_status(sid)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_lr_process.py -q` → AttributeError `lr_process_stage`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `mgo_lr/lr.py` (add `import yaml` and the config/snapshot imports used below):
 
@@ -3693,11 +3693,11 @@ def lr_process_stage(cfg, workspace, args):
     return exit_code
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_lr_process.py mgo_lr/tests/test_lr_core.py -q` → all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/lr.py mgo_lr/tests/test_lr_process.py
@@ -3714,7 +3714,7 @@ git commit -m "feat(mgo_lr): lr-process stage (H_LR/H_SR labels, imaginary gate,
 - Consumes: `convert.read_blocks/key_str/parse_key/species_orbital_info`, `lr.blocks_norm/blocks_diff_norm`, `displacements.remove_uniform_translation`, `SnapshotStore`, `load_reference`, `make_supercell`, `config.atomic_write_text/sha256_file`.
 - Produces: `validate.REQUIRED_FILES: list[str]`; `validate.hermiticity_error(blocks: dict) -> float` (max `|H_ij(R) − H_ji(−R)ᵀ|`, `inf` on an unpaired block); `validate.check_keys_and_dims(blocks, norb: list[int]) -> str | None`; `validate.tier1_snapshot(cfg, folder, status, sc, born) -> (list[str] failures, dict metrics)`; `validate.tier2_checks(store, cfg, sids) -> (e_sign: list[dict], e_linear: list[dict], violations: list[str])`; `validate.validate_stage(cfg, workspace, args) -> int`. Tier-1 failure ⇒ snapshot rejected (moved to `rejected/`, reason = joined failures) and exit 1. Tier-2 violations are warnings unless `validation.tier2_enforce` is true (then exit 1, but snapshots stay validated — enforcement gates the set, not individual snapshots). Per-snapshot `quality_checks.json`; set summary `generation_logs/validation_<set>.json` with keys `set, counts, tier1, tier2{e_sign, e_linear, violations, enforced}`. The test helpers `add_snapshot` and `ladder_workspace` are reused by Tasks 16 and 19.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_validate.py
@@ -3909,11 +3909,11 @@ def test_validate_tier2_enforce_flags_violation(tmp_path):
     assert summary["tier2"]["violations"]
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_validate.py -q` → ModuleNotFoundError `mgo_lr.validate`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # mgo_lr/validate.py
@@ -4168,11 +4168,11 @@ def validate_stage(cfg, workspace, args):
     return exit_code
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_validate.py -q` → 8 pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/validate.py mgo_lr/tests/test_validate.py
@@ -4193,7 +4193,7 @@ git commit -m "feat(mgo_lr): validate stage (Tier-1 hard checks, Tier-2 response
 - Consumes: `convert.parse_key/read_blocks`, `lr.blocks_norm`, `SnapshotStore`, validate's test helpers.
 - Produces: `locality.block_distance(key: str, cart (N,3), cell (3,3)) -> float` (AO-center distance `|r_j + R·cell − r_i|`); `locality.frobenius_inner(a, b) -> float` (over shared keys); `locality.odd_response(h_plus, h_minus, h_lr, delta) -> {"cos_theta", "r_lr"}` (`ΔH = (H⁺−H⁻)/2`, `cosθ = ⟨ΔH,H_LR⟩/(‖ΔH‖‖H_LR‖+δ)`, `r_LR = ‖H_LR‖/(‖ΔH‖+δ)`); `locality.tail_fractions(blocks, cart, cell, radii) -> list[float]` (`F(r) = Σ_{d>r}‖blk‖²/Σ‖blk‖²`); `locality.binned_norms(blocks, cart, cell, bin_width) -> list[dict]` (per-bin count/mean/median/max block norm); `locality.locality_report_stage(cfg, workspace, args) -> int` — Tier-3 only, never rejects, always exit 0 when inputs exist. Writes `generation_logs/locality/locality_<set>.json` with keys `set, n_snapshots, tail {radii, F_full, F_lr, F_sr, f_sr_below_f_full}, binned {full, lr, sr}, odd_response [{sids, amplitude, family, cos_theta, r_lr}], families {fam_id: {q_magnitude, members, mean_lr_norm_by_class}}` computed over **validated** snapshots only; odd pairs counted once from the positive-amplitude member; controlled comparisons grouped by `comparison_family_id`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_locality.py
@@ -4269,11 +4269,11 @@ def test_locality_report_empty_set(tmp_path, capsys):
     assert "no validated" in capsys.readouterr().out
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_locality.py -q` → ModuleNotFoundError `mgo_lr.locality`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 In `mgo_lr/config.py` `REQUIRED`, add after the `validation.` lines: `"locality.bin_width",`. In `mgo_lr/configs/mgo.yaml`, add after `validation:`:
 
@@ -4441,11 +4441,11 @@ def locality_report_stage(cfg, workspace, args):
     return 0
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_locality.py mgo_lr/tests/test_config.py -q` → all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/locality.py mgo_lr/config.py mgo_lr/configs/mgo.yaml mgo_lr/tests/test_locality.py
@@ -4464,7 +4464,7 @@ git commit -m "feat(mgo_lr): locality-report stage (tail fractions, odd response
 - Consumes: `SnapshotStore`, `set_dir_name`, `config.sha256_file/atomic_write_text`, `displacements.MODE_NORMALIZATION`.
 - Produces: `organize.grouped_split(groups: dict[str, list[str]], val_frac, test_frac, seed) -> dict` with keys `train/validation/test` — whole `pattern_group_id` groups land in one subset, deterministic under one seed, order-independent input; `organize.organize_stage(cfg, workspace, args) -> int` which (1) computes grouped splits over **validated main-set** snapshots, (2) writes `<workspace>/splits.json` (`seed, fractions, grouping, main{train,validation,test}, pilot, large_test`), (3) populates `validation_candidates/` and `test_candidates/` with relative symlinks into `main/` plus a portable `candidates.json` listing (existing non-symlink entries are a hard error; stale symlinks are replaced), (4) merges the dataset block into `metadata.yaml` **preserving** `lr_definition`/`training_target`: units, atom ordering, mode normalization, supercells, seed, code versions (mgo_lr/ABACUS/QE), full `dft_settings` (abacus+qe config sections), split counts, and `provenance` with **separate per-code hash sections** (`abacus.pseudopotentials/orbitals`, `quantum_espresso.pseudopotentials` — sha256 when the file exists, `null` + a `missing_files` entry otherwise). The 4×4×4 set is only ever listed as `large_test`, never split into train/val/test.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_organize.py
@@ -4580,11 +4580,11 @@ def test_organize_refuses_foreign_candidate_entries(tmp_path):
         organize.organize_stage(cfg, ws, Args())
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_organize.py -q` → ModuleNotFoundError `mgo_lr.organize`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # mgo_lr/organize.py
@@ -4729,11 +4729,11 @@ def organize_stage(cfg, workspace, args):
     return 0
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_organize.py -q` → 3 pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/organize.py mgo_lr/tests/test_organize.py
@@ -4752,7 +4752,7 @@ git commit -m "feat(mgo_lr): organize stage (grouped splits, candidates, metadat
 - Consumes: `SnapshotStore`, `config.atomic_write_text`, `convert.read_blocks` (tests), `lr.blocks_diff_norm` (tests).
 - Produces: `export.SOURCES = {"full": "hamiltonians_full.h5", "lr": "hamiltonians_lr.h5", "sr": "hamiltonians_sr.h5"}`; `export.export_snapshot(folder, target) -> "symlink"|"copy"` (relative symlink where supported, else atomic copy; writes marker `export_metadata.json`); `export.export_target_stage(cfg, workspace, args) -> int`. Safety contract: the three source files are **never modified**; `hamiltonians.h5` is only replaced when it is a symlink into `SOURCES` or the marker records a previous export — anything else is `SystemExit` (a foreign `hamiltonians.h5` is never clobbered). Snapshots need state ≥ `lr_done` for `lr`/`sr`, ≥ `converted` for `full`; all three set dirs are processed. The active target is recorded as `training_target` in `metadata.yaml`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_export.py
@@ -4830,11 +4830,11 @@ def test_export_requires_target(tmp_path):
         export.export_target_stage(cfg, ws, Args())
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_export.py -q` → ModuleNotFoundError `mgo_lr.export`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # mgo_lr/export.py
@@ -4927,11 +4927,11 @@ def export_target_stage(cfg, workspace, args):
     return 0
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `$PY -m pytest mgo_lr/tests/test_export.py -q` → 4 pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/export.py mgo_lr/tests/test_export.py
@@ -4950,7 +4950,7 @@ git commit -m "feat(mgo_lr): export-target stage (hamiltonians.h5 materializatio
 - Consumes: every stage function; test helpers `fabricate_dft` (Task 12), `PH_OUT` (Task 8), `lr_cfg` (Task 14).
 - Produces: an end-to-end synthetic run of the whole pipeline on the 2-atom cell — init-reference → collect-reference (config override) → init-dfpt → collect-dfpt (fixture ph.out) → gen-structures (46 pilot snapshots) → fabricated DFT for a subset → collect-dft → lr-process → validate → locality-report → organize → export-target sr → CLI `status` smoke test. Snapshots without DFT output must remain `prepared` untouched. `README.md` documents: stage table with commands, the asynchronous cluster round-trip, workspace layout, unit/sign/phase conventions, the Λ policy, and the test command.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # mgo_lr/tests/test_end_to_end.py
@@ -5044,20 +5044,20 @@ def test_full_pipeline(tmp_path):
     assert "pilot" in r.stdout and "validated=10" in r.stdout
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `$PY -m pytest mgo_lr/tests/test_end_to_end.py -q` → fails (README/no changes yet is fine — the test must fail only if any stage misbehaves; if it passes immediately, continue: this task's new artifact is the README plus the e2e gate).
 
-- [ ] **Step 3: Write `mgo_lr/README.md`**
+- [x] **Step 3: Write `mgo_lr/README.md`**
 
 Sections: What this is (one paragraph, pointer to spec + instructions); Requirements (`/opt/anaconda3/envs/DeepH/bin/python`, no maceh import); Quickstart table mapping each stage command to its inputs/outputs and when to run it around the cluster round-trips; Workspace layout tree; Conventions block (eV/Å/e units, `LR_SIGN`, reference-position phase, `G=0` gauge, inversion-symmetric 𝒢, Λ-is-part-of-the-definition policy, 1-based h5 keys, per-atom `orbital_types.dat`, species-major atom ordering); Validation tiers summary; `pytest` test command.
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Run: `cd /Users/jb/MACE-H && /opt/anaconda3/envs/DeepH/bin/python -m pytest mgo_lr/tests -q`
 Expected: every test from Tasks 1–19 passes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add mgo_lr/README.md mgo_lr/tests/test_end_to_end.py

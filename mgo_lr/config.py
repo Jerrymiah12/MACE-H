@@ -26,6 +26,7 @@ REQUIRED = [
     "validation.tau_translation", "validation.tau_reconstruct",
     "validation.tau_hermiticity", "validation.tau_G",
     "validation.tau_overlap_diag", "validation.tier2_enforce",
+    "locality.bin_width",
     "splits.validation_fraction", "splits.test_fraction",
     "slurm.header", "slurm.abacus_command",
 ]

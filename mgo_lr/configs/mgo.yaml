@@ -75,6 +75,9 @@ validation:
   tau_overlap_diag: 0.05        # |S_ii - 1| on R=0 diagonal
   tier2_enforce: false          # promote E_sign/E_linear to hard checks later
 
+locality:
+  bin_width: 1.0            # Angstrom, distance bin for block-norm statistics
+
 splits:
   validation_fraction: 0.10
   test_fraction: 0.10

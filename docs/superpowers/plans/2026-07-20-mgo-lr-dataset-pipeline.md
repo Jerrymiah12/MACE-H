@@ -3759,6 +3759,11 @@ def ladder_workspace(tmp_path):
     ws = str(tmp_path)
     cfg = lr_cfg()
     cell, frac, species = make_fake_reference(ws)
+    # asymmetric basis: with the ideal rocksalt basis the 2-atom ± patterns
+    # give an LR potential EVEN in A (E_sign ~ 2), so sign pairing would be
+    # meaningless — same degeneracy as in test_lr_core's amplitude test
+    frac = np.array([[0.0, 0.0, 0.0], [0.4, 0.55, 0.5]])
+    np.save(os.path.join(ws, "reference", "reference_positions.npy"), frac)
     add_dfpt_artifacts(ws)
     sc = make_supercell(cell, frac, species, cfg["supercells"]["pilot"])
     x = np.array([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]])

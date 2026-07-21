@@ -3193,8 +3193,10 @@ def test_realness_requires_inversion_symmetry():
     c = lr.lr_coefficients(g, d, r0, EPS_I, 0.8, vol)
     pts = np.array([[0.5, 1.5, 2.5]])
     assert lr.imaginary_residual(lr.evaluate_potential(g, c, pts), 1e-12) < 1e-10
-    # drop one vector: residual blows up
-    v_bad = lr.evaluate_potential(g[1:], c[1:], pts)
+    # drop the highest-weight vector (its -G partner stays): residual blows up
+    mask = np.ones(len(g), bool)
+    mask[int(np.argmax(np.abs(c)))] = False
+    v_bad = lr.evaluate_potential(g[mask], c[mask], pts)
     assert lr.imaginary_residual(v_bad, 1e-12) > 1e-4
 
 
@@ -3228,7 +3230,9 @@ def test_assemble_and_hermiticity_and_small_amplitude():
     cell, rec, vol = _cube(8.0)
     lam = 0.8
     n_int, g = lr.reciprocal_set(rec, EPS_I, lr.gmax_squared(lam, 1e-8))
-    ref = np.array([[2.0, 2.0, 2.0], [6.0, 2.0, 2.0]])
+    # asymmetric positions: a mirror-symmetric pair (2,2,2)/(6,2,2) makes
+    # both dipoles equal AND kills the linear term of V by symmetry
+    ref = np.array([[2.0, 2.0, 2.0], [5.0, 3.0, 2.0]])
     z = np.array([np.eye(3) * 2.0, np.eye(3) * -2.0])
 
     def h_lr(amp):

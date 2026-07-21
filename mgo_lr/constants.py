@@ -14,3 +14,4 @@ ANGSTROM_TO_BOHR = 1.0 / BOHR_TO_ANGSTROM
 RY_TO_EV = 13.605693122994
 C_COUL = 14.399645478425668   # e^2/(4 pi eps0) in eV*Angstrom
 LR_SIGN = -1.0                # electron potential energy vs dipole potential
+ATOMIC_NUMBERS = {"Mg": 12, "O": 8}

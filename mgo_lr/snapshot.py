@@ -67,6 +67,27 @@ class SnapshotStore:
                                  f"{self.set_name}_{sid}"))
 
 
+def load_reference(workspace):
+    """Load the permanent reference artifacts written by collect-reference."""
+    import numpy as np
+    ref_dir = os.path.join(workspace, "reference")
+    needed = ["reference_cell.npy", "reference_positions.npy",
+              "atomic_numbers.npy", "species_order.json"]
+    missing = [f for f in needed
+               if not os.path.exists(os.path.join(ref_dir, f))]
+    if missing:
+        raise FileNotFoundError(
+            f"reference artifacts missing from {ref_dir}: {missing} — run "
+            "init-reference / collect-reference first")
+    with open(os.path.join(ref_dir, "species_order.json")) as f:
+        species = json.load(f)
+    return {"prim_cell": np.load(os.path.join(ref_dir, "reference_cell.npy")),
+            "frac": np.load(os.path.join(ref_dir, "reference_positions.npy")),
+            "atomic_numbers": np.load(os.path.join(ref_dir,
+                                                   "atomic_numbers.npy")),
+            "species": species}
+
+
 def status_stage(cfg, workspace, args):
     for set_name in ("pilot", "main", "large"):
         store = SnapshotStore(workspace, set_name)

@@ -330,3 +330,67 @@ def build_large(cfg, prim_cell):
                                             _hash_id("grp", "large", n, k),
                                             900000 + k)})
     return plans
+
+
+def gen_structures_stage(cfg, workspace, args):
+    from . import abacus_io
+    from .config import atomic_write_text
+    from .snapshot import SnapshotStore, load_reference
+    from .structures import make_supercell
+
+    if getattr(args, "set_name", None) is None:
+        raise SystemExit("gen-structures requires --set pilot|main|large")
+    ref = load_reference(workspace)
+    n = cfg["supercells"][args.set_name]
+    sc = make_supercell(ref["prim_cell"], ref["frac"], ref["species"], n)
+    builders = {"pilot": build_pilot, "main": build_main, "large": build_large}
+    plans = builders[args.set_name](cfg, ref["prim_cell"])
+    store = SnapshotStore(workspace, args.set_name)
+    os.makedirs(store.set_dir, exist_ok=True)
+    seed = cfg["displacements"]["seed"]
+    min_d = float(cfg["displacements"]["min_distance"])
+    written = 0
+    for plan in plans:
+        sid, folder = plan["sid"], store.folder(plan["sid"])
+        if os.path.isdir(folder):
+            if not args.force:
+                continue
+            if any(d.startswith("OUT.") for d in os.listdir(folder)):
+                print(f"{sid}: has DFT output; refusing to regenerate")
+                continue
+        pattern = json.loads(json.dumps(plan["pattern"]))
+        meta = dict(plan["metadata"])
+        u = apply_pattern(sc, ref["prim_cell"], pattern, seed)
+        if pattern["modes"]:
+            u = remove_uniform_translation(u)
+        attempts = 0
+        while minimum_distance(sc.cell, sc.cart + u) < min_d:
+            if pattern.get("random") is None:
+                raise ValueError(
+                    f"{args.set_name}/{sid}: minimum interatomic distance "
+                    f"{minimum_distance(sc.cell, sc.cart + u):.3f} Å "
+                    f"< {min_d} Å for a deterministic pattern")
+            attempts += 1
+            if attempts > 100:
+                raise ValueError(f"{sid}: no valid random draw in 100 tries")
+            pattern["random"]["index"] += 100000
+            meta["seed"] = pattern["random"]["index"]
+            u = apply_pattern(sc, ref["prim_cell"], pattern, seed)
+        os.makedirs(folder, exist_ok=True)
+        abacus_io.write_stru(os.path.join(folder, "STRU"), sc.cell,
+                             sc.cart + u, sc.species, cfg)
+        abacus_io.write_input(os.path.join(folder, "INPUT"), cfg,
+                              calculation="scf", out_mat_hs2=1, suffix="MgO")
+        abacus_io.write_kpt(os.path.join(folder, "KPT"),
+                            cfg["abacus"]["kmesh_supercell"][args.set_name])
+        np.save(os.path.join(folder, "displacements.npy"), u)
+        meta["pattern"] = pattern
+        atomic_write_text(os.path.join(folder, "displacement_metadata.json"),
+                          json.dumps(meta, indent=1))
+        store.write_status(sid, "prepared", set_name=args.set_name)
+        written += 1
+    abacus_io.write_job_script(os.path.join(store.set_dir, "job_abacus.sh"),
+                               cfg, [p["sid"] for p in plans])
+    print(f"{args.set_name}: wrote {written} snapshots "
+          f"({len(plans) - written} skipped)")
+    return 0

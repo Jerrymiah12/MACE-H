@@ -61,6 +61,15 @@ def atomic_write_text(path, text):
     os.replace(tmp, path)
 
 
+def sha256_file(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def save_resolved(cfg, workspace, stage):
     logs = os.path.join(workspace, "generation_logs")
     os.makedirs(logs, exist_ok=True)

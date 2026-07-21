@@ -124,3 +124,129 @@ def blocks_diff_norm(a, b):
             else (va if vb is None else -vb)
         tot += float(np.sum(d * d))
     return float(np.sqrt(tot))
+
+
+def _lr_definition(cfg, gmax_sq, rep):
+    return {"ewald_lambda": float(cfg["lr"]["ewald_lambda"]),
+            "reciprocal_cutoff": float(gmax_sq),
+            "reciprocal_tolerance": float(cfg["lr"]["reciprocal_tolerance"]),
+            "reciprocal_set": {"inversion_symmetric": True,
+                               "excludes_G_zero": True,
+                               "cutoff_type": "dielectric_ellipsoid",
+                               "number_of_vectors": int(rep["number_of_vectors"])},
+            "imaginary_tolerance": float(cfg["lr"]["imaginary_tolerance"]),
+            "gauge": "G_zero_equals_zero",
+            "sign_convention": "electron_potential_energy",
+            "phase_convention": "reference_positions"}
+
+
+def _record_lr_definition(workspace, lr_def):
+    import yaml
+    from .config import atomic_write_text
+    path = os.path.join(workspace, "metadata.yaml")
+    data = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    stored = data.get("lr_definition")
+    if stored is not None and stored != lr_def:
+        raise SystemExit(
+            "metadata.yaml already records a different lr_definition — "
+            "refusing to mix LR definitions in one workspace (change the "
+            "workspace or restore the original Λ/cutoff config)")
+    data["lr_definition"] = lr_def
+    atomic_write_text(path, yaml.safe_dump(data, sort_keys=False))
+
+
+def lr_process_stage(cfg, workspace, args):
+    from .config import atomic_write_text
+    from .convert import read_blocks, write_blocks
+    from .displacements import remove_uniform_translation
+    from .snapshot import SnapshotStore, load_reference
+    from .structures import make_supercell, reciprocal
+    from . import __version__
+
+    if getattr(args, "set_name", None) is None:
+        raise SystemExit("lr-process requires --set pilot|main|large")
+    ref = load_reference(workspace)
+    ref_dir = os.path.join(workspace, "reference")
+    born = np.load(os.path.join(ref_dir, "born_effective_charges.npy"))
+    eps = np.load(os.path.join(ref_dir, "dielectric_infinity.npy"))
+    n = cfg["supercells"][args.set_name]
+    sc = make_supercell(ref["prim_cell"], ref["frac"], ref["species"], n)
+    lam = float(cfg["lr"]["ewald_lambda"])
+    tol = float(cfg["lr"]["reciprocal_tolerance"])
+    tau_imag = float(cfg["lr"]["imaginary_tolerance"])
+    factor = float(cfg["lr"]["convergence_factor"])
+    delta = float(cfg["validation"]["delta"])
+    rec = reciprocal(sc.cell)
+    volume = abs(float(np.linalg.det(sc.cell)))
+    gmax_sq = gmax_squared(lam, tol)
+    n_int, g_cart = reciprocal_set(rec, eps, gmax_sq)
+    rep = check_reciprocal_set(n_int)
+    if not rep["ok"] or rep["number_of_vectors"] == 0:
+        raise SystemExit(f"reciprocal set invalid or empty: {rep}")
+    n_int2, g2 = reciprocal_set(rec, eps, gmax_sq * factor ** 2)
+    lr_def = _lr_definition(cfg, gmax_sq, rep)
+    _record_lr_definition(workspace, lr_def)
+
+    store = SnapshotStore(workspace, args.set_name)
+    exit_code, processed, skipped = 0, 0, 0
+    for sid in store.list():
+        st = store.read_status(sid)
+        if st["state"] == "rejected" \
+                or not store.state_at_least(sid, "converted"):
+            continue
+        if store.state_at_least(sid, "lr_done") and not args.force:
+            skipped += 1
+            continue
+        folder = store.folder(sid)
+        pos = np.loadtxt(os.path.join(folder, "site_positions.dat")).T
+        u = minimum_image_displacements(sc.cell, pos, sc.cart)
+        u_stored = np.load(os.path.join(folder, "displacements.npy"))
+        if np.abs(u - u_stored).max() > 1e-6:
+            print(f"WARNING {sid}: recomputed u differs from "
+                  f"displacements.npy by {np.abs(u - u_stored).max():.2e} Å")
+        u_rel = remove_uniform_translation(u)          # processor-level ASR
+        dipoles = np.einsum("nab,nb->na", born[sc.basis_index], u_rel)
+        coeffs = lr_coefficients(g_cart, dipoles, sc.cart, eps, lam, volume)
+        v_c = evaluate_potential(g_cart, coeffs, pos)  # snapshot AO centers
+        r_imag = imaginary_residual(v_c, delta)
+        if r_imag >= tau_imag:
+            atomic_write_text(
+                os.path.join(folder, "lr_failure.json"),
+                json.dumps({"r_imag": r_imag, "reciprocal_set": rep,
+                            "n_vectors": int(len(n_int)),
+                            "lr_definition": lr_def}, indent=1))
+            store.write_status(sid, st["state"],
+                               lr_failed=f"imaginary_residual {r_imag:.3e}")
+            exit_code = 1
+            continue
+        v_atom = np.real(v_c)
+        s_blocks = read_blocks(os.path.join(folder, "overlaps.h5"))
+        h_full = read_blocks(os.path.join(folder, "hamiltonians_full.h5"))
+        h_lr = assemble_lr_hamiltonian(s_blocks, v_atom)
+        coeffs2 = lr_coefficients(g2, dipoles, sc.cart, eps, lam, volume)
+        v2 = np.real(evaluate_potential(g2, coeffs2, pos))
+        h_lr2 = assemble_lr_hamiltonian(s_blocks, v2)
+        conv = blocks_diff_norm(h_lr2, h_lr) / (blocks_norm(h_lr2) + delta)
+        h_sr = {}
+        for k in set(h_full) | set(h_lr):
+            hf = h_full.get(k)
+            hl = h_lr.get(k)
+            if hf is None:
+                hf = np.zeros_like(hl)
+            if hl is None:
+                hl = np.zeros_like(hf)
+            h_sr[k] = hf - hl
+        write_blocks(os.path.join(folder, "hamiltonians_lr.h5"), h_lr)
+        write_blocks(os.path.join(folder, "hamiltonians_sr.h5"), h_sr)
+        atomic_write_text(os.path.join(folder, "lr_metadata.json"),
+                          json.dumps({"lr_definition": lr_def,
+                                      "r_imag": r_imag,
+                                      "lr_convergence": conv,
+                                      "code_version": __version__}, indent=1))
+        store.write_status(sid, "lr_done", r_imag=r_imag, lr_convergence=conv)
+        processed += 1
+    print(f"{args.set_name}: lr-processed {processed}, skipped {skipped}")
+    return exit_code

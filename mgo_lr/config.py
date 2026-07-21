@@ -14,6 +14,7 @@ REQUIRED = [
     "abacus.csr_h_filename", "abacus.csr_s_filename", "abacus.version",
     "qe.pseudo_dir", "qe.pseudopotentials", "qe.ecutwfc", "qe.kmesh",
     "qe.conv_thr", "qe.tr2_ph", "qe.version", "qe.pw_command", "qe.ph_command",
+    "dfpt.zstar_sum_warn", "dfpt.isotropy_warn",
     "reference.ecut_scan", "reference.kmesh_scan",
     "supercells.pilot", "supercells.main", "supercells.large",
     "displacements.seed", "displacements.min_distance",

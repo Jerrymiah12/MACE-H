@@ -49,6 +49,115 @@ def write_ph_input(path, cfg):
     atomic_write_text(path, "\n".join(lines) + "\n")
 
 
+_FLOAT = r"[-+]?\d+\.?\d*(?:[EeDd][-+]?\d+)?"
+
+
+def _three_floats(line):
+    vals = re.findall(_FLOAT, line)
+    if len(vals) < 3:
+        raise ValueError(f"expected 3 floats in ph.x line: {line!r}")
+    return [float(v.replace("D", "E").replace("d", "e")) for v in vals[-3:]]
+
+
+def parse_ph_output(text):
+    """Extract eps_inf and Born charges (d Force / dE block) from ph.x output."""
+    lines = text.splitlines()
+    eps = None
+    for i, line in enumerate(lines):
+        if "Dielectric constant in cartesian axis" in line:
+            rows = [l for l in lines[i + 1:i + 8] if "(" in l][:3]
+            if len(rows) != 3:
+                raise ValueError("ph.x output: dielectric block malformed")
+            eps = np.array([_three_floats(r) for r in rows])
+    idx = None
+    for i, line in enumerate(lines):
+        if "Effective charges (d Force / dE) in cartesian axis" in line:
+            idx = i
+    if eps is None or idx is None:
+        raise ValueError(
+            "ph.x output lacks the dielectric tensor or Born effective "
+            "charges — was ph.x run with epsil=.true. and trans=.true.?")
+    atom_re = re.compile(r"atom\s+(\d+)\s+(\S+)")
+    zstar, labels = [], []
+    i = idx + 1
+    while i < len(lines):
+        if "Effective charges" in lines[i]:
+            break                                # next block (d P / du)
+        m = atom_re.search(lines[i])
+        if m:
+            rows = [l for l in lines[i + 1:i + 5] if "(" in l][:3]
+            if len(rows) != 3:
+                raise ValueError(f"ph.x Born block malformed at atom {m.group(1)}")
+            zstar.append([_three_floats(r) for r in rows])
+            labels.append(m.group(2))
+            i += 4
+        else:
+            i += 1
+    if not zstar:
+        raise ValueError("ph.x output: no Born-charge atom blocks found")
+    return np.asarray(eps, float), np.asarray(zstar, float), labels
+
+
+def apply_asr(zstar):
+    """Acoustic sum rule: Z~*_k = Z*_k - (1/N) sum_k' Z*_k'."""
+    zstar = np.asarray(zstar, float)
+    return zstar - zstar.sum(axis=0)[None] / zstar.shape[0]
+
+
+def collect_dfpt_stage(cfg, workspace, args):
+    from .snapshot import load_reference
+    ref_dir = os.path.join(workspace, "reference")
+    out_path = os.path.join(ref_dir, "qe", "ph.out")
+    if not os.path.exists(out_path):
+        raise SystemExit(f"ph.x output not found: {out_path}")
+    with open(out_path) as f:
+        eps, zstar, labels = parse_ph_output(f.read())
+    ref = load_reference(workspace)
+    hard, warn = [], []
+    if list(labels) != list(ref["species"]):
+        hard.append(f"atom labels {labels} != species order {ref['species']}")
+    if zstar.shape != (len(ref["species"]), 3, 3):
+        hard.append(f"Z* shape {zstar.shape} != (2,3,3)")
+    if eps.shape != (3, 3):
+        hard.append(f"eps shape {eps.shape} != (3,3)")
+    else:
+        if not np.allclose(eps, eps.T, atol=1e-6):
+            warn.append("eps_inf not symmetric")
+        if np.linalg.eigvalsh(0.5 * (eps + eps.T)).min() <= 0.0:
+            hard.append("eps_inf not positive definite")
+    if not hard:
+        raw_sum = np.abs(zstar.sum(axis=0)).max()
+        if raw_sum > float(cfg["dfpt"]["zstar_sum_warn"]):
+            warn.append(f"raw ASR violation max|sum Z*| = {raw_sum:.4f}")
+        z_asr = apply_asr(zstar)
+        for a, lab in enumerate(labels):
+            z = z_asr[a]
+            diag = np.diag(z)
+            off = float(np.abs(z - np.diag(diag)).max())
+            aniso = float(np.abs(diag - diag.mean()).max()
+                          / max(abs(diag.mean()), 1e-12))
+            if off > float(cfg["dfpt"]["isotropy_warn"]) \
+                    or aniso > float(cfg["dfpt"]["isotropy_warn"]):
+                warn.append(f"Z*({lab}) anisotropic: off {off:.4f}, "
+                            f"rel {aniso:.4f}")
+        if not (np.diag(z_asr[0]).mean() > 0.0 > np.diag(z_asr[1]).mean()):
+            hard.append("Z* diagonal signs wrong: expected Z*_Mg > 0 > Z*_O")
+    checks = {"hard_failures": hard, "warnings": warn}
+    atomic_write_text(os.path.join(ref_dir, "dfpt_checks.json"),
+                      json.dumps(checks, indent=1))
+    if hard:
+        raise SystemExit("collect-dfpt hard failures: " + "; ".join(hard))
+    np.save(os.path.join(ref_dir, "born_effective_charges.npy"), z_asr)
+    np.save(os.path.join(ref_dir, "dielectric_infinity.npy"), eps)
+    shutil.copyfile(out_path, os.path.join(ref_dir, "qe_dfpt_output.out"))
+    for w in warn:
+        print(f"WARNING: {w}")
+    print(f"Z*_Mg = {np.diag(z_asr[0]).mean():+.4f}, "
+          f"Z*_O = {np.diag(z_asr[1]).mean():+.4f}, "
+          f"eps_inf = {np.diag(eps).mean():.4f}")
+    return 0
+
+
 def init_dfpt_stage(cfg, workspace, args):
     from .snapshot import load_reference
     ref = load_reference(workspace)

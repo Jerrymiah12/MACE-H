@@ -35,6 +35,10 @@ qe:
   pw_command: "mpirun -n 16 pw.x"
   ph_command: "mpirun -n 16 ph.x"
 
+dfpt:
+  zstar_sum_warn: 0.05     # |sum_kappa Z*| above this warns (raw, pre-ASR)
+  isotropy_warn: 0.05      # relative anisotropy / off-diagonal warning level
+
 reference:
   ecut_scan: [60, 80, 100, 120]
   kmesh_scan: [[4, 4, 4], [6, 6, 6], [8, 8, 8], [10, 10, 10]]

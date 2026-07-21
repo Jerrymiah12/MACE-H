@@ -32,6 +32,8 @@ qe:
   conv_thr: 1.0e-12
   tr2_ph: 1.0e-14
   version: "7.2"
+  pw_command: "mpirun -n 16 pw.x"
+  ph_command: "mpirun -n 16 ph.x"
 
 reference:
   ecut_scan: [60, 80, 100, 120]

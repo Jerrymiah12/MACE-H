@@ -1,0 +1,81 @@
+material:
+  name: MgO
+  lattice_constant_guess: 4.25        # Angstrom, rocksalt conventional cube
+  lattice_constant_relaxed: null      # set after collect-reference (or parsed)
+  species: [Mg, O]
+  masses: {Mg: 24.305, O: 15.999}
+
+abacus:
+  pseudo_dir: /path/on/cluster/abacus_pseudo
+  orbital_dir: /path/on/cluster/abacus_orb
+  pseudopotentials: {Mg: Mg_ONCV_PBE-1.0.upf, O: O_ONCV_PBE-1.0.upf}
+  orbitals: {Mg: Mg_gga_8au_100Ry_4s2p1d.orb, O: O_gga_8au_100Ry_3s3p2d.orb}
+  # l of every orbital per species, in ABACUS shell order (4s2p1d etc.)
+  orbital_types: {Mg: [0, 0, 0, 0, 1, 1, 2], O: [0, 0, 0, 1, 1, 2]}
+  ecutwfc: 100
+  scf_thr: 1.0e-8
+  scf_nmax: 100
+  smearing_method: gaussian
+  smearing_sigma: 0.002
+  kmesh_primitive: [8, 8, 8]
+  kmesh_supercell: {pilot: [4, 4, 4], main: [3, 3, 3], large: [2, 2, 2]}
+  gamma_only_algorithm: false
+  csr_h_filename: data-HR-sparse_SPIN0.csr
+  csr_s_filename: data-SR-sparse_SPIN0.csr
+  version: "3.7"
+
+qe:
+  pseudo_dir: /path/on/cluster/qe_pseudo
+  pseudopotentials: {Mg: Mg_ONCV_PBE-1.0.upf, O: O_ONCV_PBE-1.0.upf}
+  ecutwfc: 80
+  kmesh: [8, 8, 8]
+  conv_thr: 1.0e-12
+  tr2_ph: 1.0e-14
+  version: "7.2"
+
+reference:
+  ecut_scan: [60, 80, 100, 120]
+  kmesh_scan: [[4, 4, 4], [6, 6, 6], [8, 8, 8], [10, 10, 10]]
+
+supercells: {pilot: 2, main: 3, large: 4}
+
+displacements:
+  seed: 20260720
+  amplitudes: [0.005, 0.01, 0.02, 0.04, 0.06]   # Angstrom, main set
+  pilot_ladder: [0.0025, 0.005, 0.01, 0.02]     # Angstrom, pilot sign pairs
+  min_distance: 1.8                             # Angstrom, hard reject below
+  main_composition:
+    single_q_optical: 150
+    mixed_low_q: 120
+    random_local: 60
+    sign_paired_calibration: 40
+    near_equilibrium: 30
+  large_count: 40
+
+lr:
+  ewald_lambda: 0.35            # 1/Angstrom; part of the dataset definition
+  reciprocal_tolerance: 1.0e-10 # f_Ewald floor -> Gmax
+  imaginary_tolerance: 1.0e-8   # hard gate on r_imag
+  convergence_factor: 1.5       # Gmax ratio for the convergence metric
+
+validation:
+  delta: 1.0e-12
+  tau_eq: 1.0e-10               # eV, max|H_LR| at equilibrium
+  tau_u: 1.0e-12                # Angstrom, max|u_rel| for rigid translation
+  tau_translation: 1.0e-10      # eV
+  tau_reconstruct: 1.0e-12      # relative Frobenius
+  tau_hermiticity: 1.0e-8       # eV, max abs
+  tau_G: 1.0e-6                 # relative Frobenius
+  tau_overlap_diag: 0.05        # |S_ii - 1| on R=0 diagonal
+  tier2_enforce: false          # promote E_sign/E_linear to hard checks later
+
+splits:
+  validation_fraction: 0.10
+  test_fraction: 0.10
+
+slurm:
+  header: |
+    #!/bin/bash
+    #SBATCH --nodes=1
+    #SBATCH --time=04:00:00
+  abacus_command: "mpirun -n 16 abacus"

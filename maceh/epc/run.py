@@ -1,4 +1,5 @@
 import os
+import tempfile
 import time
 import warnings
 
@@ -9,8 +10,8 @@ from ..kernel import DeepHE3Kernel, NetOutInfo
 from ..graph import Collater, get_edge_fea
 from ..parse_configs import EPCConfig
 from .supercell import load_structure, build_supercell, uniform_grid
-from .derivative import (build_supercell_graph, finite_difference, acoustic_sum_rule,
-                         hermitize_blocks)
+from .derivative import (build_supercell_graph, finite_difference, stream_finite_difference,
+                         acoustic_sum_rule, hermitize_blocks)
 from .assemble import write_epc_cartesian_h5
 
 
@@ -120,51 +121,58 @@ def run_epc(config_path, debug=False):
     positions0 = data.pos.clone()
 
     n_displaced = len(config.atom_indices) if config.atom_indices else smap.n_uc_atoms
-    begin = time.time()
-    deriv = finite_difference(predict_fn, positions0, smap, norb_cumsum, config.delta,
-                              atom_indices=config.atom_indices,
-                              grad_threshold=config.grad_threshold)
-    print(f'Finished {6 * n_displaced} forward passes on the supercell, '
-          f'cost {time.time() - begin:.2f} seconds.')
-
-    # delta-convergence report on the first displaced atom
-    probe = [config.atom_indices[0]] if config.atom_indices else [0]
-    deriv_half = finite_difference(predict_fn, positions0, smap, norb_cumsum,
-                                   config.delta / 2, atom_indices=probe,
-                                   grad_threshold=config.grad_threshold)
-    dev = 0.0
-    for alpha in range(3):
-        full = deriv.blocks[(probe[0], alpha)]
-        half = deriv_half.blocks[(probe[0], alpha)]
-        for pR in set(full) | set(half):
-            a = full.get(pR)
-            b = half.get(pR)
-            if a is None:
-                dev = max(dev, float(np.abs(b).max()))
-            elif b is None:
-                dev = max(dev, float(np.abs(a).max()))
-            else:
-                dev = max(dev, float(np.abs(a - b).max()))
-    print(f'delta-convergence: max |dH(delta) - dH(delta/2)| = {dev:.3e} eV/A '
-          f'(delta = {config.delta} A)')
-    if config.atom_indices is None:
-        print(f'acoustic sum rule violation: {acoustic_sum_rule(deriv):.3e} eV/A')
-
-    print('\n------- Stage 2: Fourier transform to g_ij,ka(k, q) -------')
     stru_id = os.path.basename(os.path.normpath(config.structure_dir))
     out_dir = os.path.join(config.out_dir, stru_id)
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, 'epc_cartesian_pred.h5')
-    write_epc_cartesian_h5(out_path, struct, deriv,
-                           kpts=uniform_grid(config.k_grid),
-                           qpts=uniform_grid(config.q_grid),
-                           attrs=dict(
-        units='g in eV/Angstrom; k, q fractional; lattice, positions in Angstrom',
-        spinful=kernel0.dataset_info.spinful, delta=config.delta,
-        model_dir=config.model_dir,
-        note='Cartesian AO coupling g_ij,ka(k,q) = [dH(k,q)/dtau_ka]_ij; phonon-mode '
-             'contraction and band transformation (incl. possible dS/dtau handling) '
-             'are left for downstream postprocessing',
-        date=time.strftime('%Y-%m-%d %H:%M:%S')),
-                           save_derivatives=config.save_derivatives)
-    print(f'\nEPC written to "{out_path}"')
+    fd_scratch, scratch_path = tempfile.mkstemp(dir=out_dir, prefix='epc_dH.', suffix='.h5')
+    os.close(fd_scratch)
+    begin = time.time()
+    deriv = stream_finite_difference(predict_fn, positions0, smap, norb_cumsum,
+                                     config.delta, scratch_path,
+                                     atom_indices=config.atom_indices,
+                                     grad_threshold=config.grad_threshold)
+    print(f'Finished {6 * n_displaced} forward passes on the supercell, '
+          f'cost {time.time() - begin:.2f} seconds.')
+
+    try:
+        # delta-convergence report on the first displaced atom
+        probe = [config.atom_indices[0]] if config.atom_indices else [0]
+        deriv_half = finite_difference(predict_fn, positions0, smap, norb_cumsum,
+                                       config.delta / 2, atom_indices=probe,
+                                       grad_threshold=config.grad_threshold)
+        dev = 0.0
+        for alpha in range(3):
+            full = deriv.group(probe[0], alpha)
+            half = deriv_half.group(probe[0], alpha)
+            for pR in set(full) | set(half):
+                a = full.get(pR)
+                b = half.get(pR)
+                if a is None:
+                    dev = max(dev, float(np.abs(b).max()))
+                elif b is None:
+                    dev = max(dev, float(np.abs(a).max()))
+                else:
+                    dev = max(dev, float(np.abs(a - b).max()))
+        print(f'delta-convergence: max |dH(delta) - dH(delta/2)| = {dev:.3e} eV/A '
+              f'(delta = {config.delta} A)')
+        if config.atom_indices is None:
+            print(f'acoustic sum rule violation: {acoustic_sum_rule(deriv):.3e} eV/A')
+
+        print('\n------- Stage 2: Fourier transform to g_ij,ka(k, q) -------')
+        out_path = os.path.join(out_dir, 'epc_cartesian_pred.h5')
+        write_epc_cartesian_h5(out_path, struct, deriv,
+                               kpts=uniform_grid(config.k_grid),
+                               qpts=uniform_grid(config.q_grid),
+                               attrs=dict(
+            units='g in eV/Angstrom; k, q fractional; lattice, positions in Angstrom',
+            spinful=kernel0.dataset_info.spinful, delta=config.delta,
+            model_dir=config.model_dir,
+            note='Cartesian AO coupling g_ij,ka(k,q) = [dH(k,q)/dtau_ka]_ij; phonon-mode '
+                 'contraction and band transformation (incl. possible dS/dtau handling) '
+                 'are left for downstream postprocessing',
+            date=time.strftime('%Y-%m-%d %H:%M:%S')),
+                               save_derivatives=config.save_derivatives)
+        print(f'\nEPC written to "{out_path}"')
+    finally:
+        if os.path.exists(scratch_path):
+            os.remove(scratch_path)

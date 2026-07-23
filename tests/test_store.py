@@ -19,6 +19,24 @@ def write_fixture(path):
         f['dH/0/y/[0, 0, 0, 0, 0, 0]'] = np.array([[2.0]])
 
 
+def test_group_order_is_canonical_not_hdf5_link_order(tmp_path):
+    # HDF5 iterates links lexicographically by name, so '[..., 10, 0, 0]' comes back
+    # before '[..., 2, 0, 0]'; group() must undo that or the non-associative Fourier
+    # sum lands on different bits than the in-memory backend
+    path = str(tmp_path / 'dH.h5')
+    keys = [((0, 0, 0), (10, 0, 0)), ((0, 0, 0), (2, 0, 0)), ((0, 0, 0), (-1, 0, 0))]
+    with h5py.File(path, 'w') as f:
+        f['n_grid'] = np.array([2, 1, 1], dtype=int)
+        f['n_uc_atoms'] = 1
+        f['delta'] = 0.01
+        f['norb_cumsum'] = np.array([0, 1])
+        for p, R in keys:
+            f[f'dH/0/x/{str(list(p) + list(R))}'] = np.array([[1.0]])
+        assert list(f['dH/0/x']) == ['[0, 0, 0, -1, 0, 0]', '[0, 0, 0, 10, 0, 0]',
+                                     '[0, 0, 0, 2, 0, 0]']
+    assert list(H5DerivativeStore(path).group(0, 0)) == sorted(keys)
+
+
 def test_store_metadata(tmp_path):
     path = str(tmp_path / 'dH.h5')
     write_fixture(path)

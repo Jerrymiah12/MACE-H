@@ -7,7 +7,7 @@ import h5py
 
 from ..graph import get_graph, get_edge_fea
 from .supercell import fold_key
-from .store import H5DerivativeStore
+from .store import H5DerivativeStore, canonical_group
 
 
 def build_supercell_graph(struct, radius, default_dtype_torch):
@@ -52,8 +52,10 @@ class DerivativeData:
         return list(self.blocks.keys())
 
     def group(self, kappa, alpha):
-        r''' {(p, R): dense (norb_tot, norb_tot)} for one (kappa, alpha); {} if absent '''
-        return self.blocks.get((kappa, alpha), {})
+        r''' {(p, R): dense (norb_tot, norb_tot)} for one (kappa, alpha); {} if absent.
+        Canonically ordered, so the Fourier sum is bit-for-bit reproducible against
+        an H5DerivativeStore over the same derivatives. '''
+        return canonical_group(self.blocks.get((kappa, alpha), {}))
 
     def nbytes(self):
         r''' total size of the stored derivative blocks in bytes '''

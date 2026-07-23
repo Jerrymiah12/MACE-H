@@ -3,6 +3,18 @@ import json
 import h5py
 
 
+def canonical_group(blocks):
+    r''' derivative blocks in a storage-independent (p, R) order. Float addition is
+    not associative, so the Fourier sum in assemble only lands on the same bits from
+    either backend if every group() hands its keys back in one canonical order:
+    HDF5 iterates links lexicographically by name, where '[0, 0, 0, 10, 0, 0]' sorts
+    before '[0, 0, 0, 2, 0, 0]' and a leading '-1' before both, while an in-memory
+    dict preserves the insertion order of the predicted hoppings. Sorting at write
+    time cannot fix this -- string order is not tuple order -- so both accessors
+    sort on read instead. '''
+    return dict(sorted(blocks.items()))
+
+
 class H5DerivativeStore:
     r''' read-only view of real-space Hamiltonian derivatives persisted by
     stream_finite_difference. Presents the same metadata attributes and
@@ -52,4 +64,4 @@ class H5DerivativeStore:
                 key = json.loads(name)               # [px, py, pz, Rx, Ry, Rz]
                 p, R = tuple(key[:3]), tuple(key[3:])
                 out[(p, R)] = ds[()]
-        return out
+        return canonical_group(out)

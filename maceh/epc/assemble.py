@@ -4,6 +4,9 @@ import tempfile
 import numpy as np
 import h5py
 
+# memory budget for one k-batch of the complex accumulator in write_epc_cartesian_h5
+BATCH_BYTES = 16 * 1024 ** 2
+
 
 def displaced_atoms(deriv):
     return np.array(sorted({kappa for kappa, _ in deriv.pairs()}), dtype=int)
@@ -66,11 +69,14 @@ def write_epc_cartesian_h5(path, struct, deriv, kpts, qpts, attrs,
           f' (~{size_bytes / 1024 ** 3:.2f} GiB on disk)')
     norb_per_atom = np.diff(deriv.norb_cumsum)
     orbital_indices = np.repeat(np.arange(deriv.n_uc_atoms), norb_per_atom)
-    # chunk along k only: every write below fills one whole (nk, norb, norb) hyperslab
-    # at fixed (q, kappa, alpha) exactly once, so a chunk spanning q/kappa/alpha would
-    # be left partially filled and force HDF5 into read-modify-write on the next write
-    nk_chunk = max(1, min(len(kpts), 4 * 1024 ** 2 // max(norb * norb * 8, 1)))
-    chunks = (nk_chunk, 1, 1, 1, norb, norb)
+    # k is transformed one batch at a time: the complex accumulator and its broadcast
+    # temporary are the largest live arrays in stage 2, and a whole (nk, norb, norb)
+    # slab reaches hundreds of MiB on realistic grids. Chunk along k to the same batch
+    # and along nothing else, so every write covers whole chunks exactly once -- a
+    # chunk spanning q/kappa/alpha would be left partly filled and force HDF5 into
+    # read-modify-write on the next write.
+    nk_batch = max(1, min(len(kpts), BATCH_BYTES // max(norb * norb * 16, 1)))
+    chunks = (nk_batch, 1, 1, 1, norb, norb)
     # unique temp name in the destination directory: concurrent jobs writing the
     # same path must not truncate or delete each other's in-progress file, and
     # os.replace stays atomic only within one filesystem
@@ -85,9 +91,15 @@ def write_epc_cartesian_h5(path, struct, deriv, kpts, qpts, attrs,
                 for alpha in range(3):
                     blocks = deriv.group(kappa, alpha)
                     for iq, q in enumerate(qpts):
-                        slab = group_q_slab(blocks, kpts, q, norb)
-                        g_real[:, iq, ikap, alpha] = slab.real
-                        g_imag[:, iq, ikap, alpha] = slab.imag
+                        for k0 in range(0, len(kpts), nk_batch):
+                            k1 = min(k0 + nk_batch, len(kpts))
+                            slab = group_q_slab(blocks, kpts[k0:k1], q, norb)
+                            g_real[k0:k1, iq, ikap, alpha] = slab.real
+                            g_imag[k0:k1, iq, ikap, alpha] = slab.imag
+                            # each k row is independent, so batching is arithmetically
+                            # a no-op; dropping the slab keeps the previous batch from
+                            # staying alive while the next one is built
+                            del slab
                     if save_derivatives:
                         # copied while the group is already in hand: a second pass over
                         # deriv would double the reads for an on-disk store

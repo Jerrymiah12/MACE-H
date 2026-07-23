@@ -16,6 +16,16 @@ def make_deriv():
                           norb_cumsum=np.array([0, 1]), blocks=blocks)
 
 
+def test_derivativedata_accessor_interface():
+    deriv = make_deriv()
+    assert set(deriv.pairs()) == {(0, 0), (0, 1), (0, 2)}
+    g0 = deriv.group(0, 0)
+    assert g0[((0, 0, 0), (0, 0, 0))][0, 0] == pytest.approx(1.0)
+    assert g0[((1, 0, 0), (2, 0, 0))][0, 0] == pytest.approx(0.5)
+    assert deriv.group(0, 1) == {}
+    assert deriv.group(5, 0) == {}  # absent pair -> empty, never KeyError
+
+
 def test_compute_epc_cartesian_phases():
     deriv = make_deriv()
     kpts = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]])

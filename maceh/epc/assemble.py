@@ -6,7 +6,7 @@ import h5py
 
 
 def displaced_atoms(deriv):
-    return np.array(sorted({kappa for kappa, _ in deriv.blocks.keys()}), dtype=int)
+    return np.array(sorted({kappa for kappa, _ in deriv.pairs()}), dtype=int)
 
 
 def compute_q_slab(deriv, kpts, q, displaced):
@@ -19,7 +19,7 @@ def compute_q_slab(deriv, kpts, q, displaced):
     slab = np.zeros((len(kpts), len(displaced), 3, norb, norb), dtype=np.complex128)
     for ikap, kappa in enumerate(displaced):
         for alpha in range(3):
-            for (p, R), m in deriv.blocks.get((kappa, alpha), {}).items():
+            for (p, R), m in deriv.group(kappa, alpha).items():
                 phase_q = np.exp(2j * np.pi * (q @ np.asarray(p, dtype=np.float64)))
                 phase_k = np.exp(2j * np.pi * (kpts @ np.asarray(R, dtype=np.float64)))
                 slab[:, ikap, alpha] += (phase_q * phase_k)[:, None, None] * m
@@ -53,8 +53,8 @@ def write_epc_cartesian_h5(path, struct, deriv, kpts, qpts, attrs,
     shape = (len(kpts), len(qpts), len(displaced), 3, norb, norb)
     size_bytes = 2 * float(np.prod(shape)) * 8
     if save_derivatives:
-        size_bytes += sum(m.nbytes for by_pR in deriv.blocks.values()
-                          for m in by_pR.values())
+        size_bytes += sum(m.nbytes for kappa, alpha in deriv.pairs()
+                          for m in deriv.group(kappa, alpha).values())
     print(f'Writing g_real/g_imag of shape {shape}'
           f'{" plus dH derivatives" if save_derivatives else ""}'
           f' (~{size_bytes / 1024 ** 3:.2f} GiB on disk)')
@@ -87,8 +87,8 @@ def write_epc_cartesian_h5(path, struct, deriv, kpts, qpts, attrs,
             for k, v in attrs.items():
                 f.attrs[k] = v
             if save_derivatives:
-                for (kappa, alpha), by_pR in deriv.blocks.items():
-                    for (p, R), m in by_pR.items():
+                for kappa, alpha in deriv.pairs():
+                    for (p, R), m in deriv.group(kappa, alpha).items():
                         f[f'dH/{kappa}/{"xyz"[alpha]}/{str(list(p) + list(R))}'] = m
         os.replace(tmp_path, path)
     except BaseException:

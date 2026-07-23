@@ -45,6 +45,14 @@ class DerivativeData:
     def norb_tot(self):
         return int(self.norb_cumsum[-1])
 
+    def pairs(self):
+        r''' (kappa, alpha) pairs that have a stored derivative group '''
+        return list(self.blocks.keys())
+
+    def group(self, kappa, alpha):
+        r''' {(p, R): dense (norb_tot, norb_tot)} for one (kappa, alpha); {} if absent '''
+        return self.blocks.get((kappa, alpha), {})
+
 
 def hermitize_blocks(H):
     r''' H_ij(R) <- (H_ij(R) + H_ji(-R)^dagger) / 2, matching the symmetrization the
@@ -111,7 +119,7 @@ def acoustic_sum_rule(deriv):
     for alpha in range(3):
         acc = {}
         for kappa in range(deriv.n_uc_atoms):
-            for (p, R), dense in deriv.blocks.get((kappa, alpha), {}).items():
+            for (p, R), dense in deriv.group(kappa, alpha).items():
                 acc[R] = acc.get(R, 0) + dense
         for m in acc.values():
             worst = max(worst, float(np.abs(m).max()))

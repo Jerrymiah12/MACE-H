@@ -3,9 +3,11 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+import h5py
 
 from ..graph import get_graph, get_edge_fea
 from .supercell import fold_key
+from .store import H5DerivativeStore
 
 
 def build_supercell_graph(struct, radius, default_dtype_torch):
@@ -69,6 +71,38 @@ def hermitize_blocks(H):
     return out
 
 
+def _fd_one_pair(predict_fn, positions0, smap, norb_cumsum, delta, kappa, alpha,
+                 grad_threshold):
+    r''' central difference of hopping blocks w.r.t. one (kappa, alpha)
+    displacement, folded to unit-cell labels. Returns {(p, R): dense}. '''
+    norb_cumsum = np.asarray(norb_cumsum)
+    norb_tot = int(norb_cumsum[-1])
+    pos_plus = positions0.clone()
+    pos_plus[kappa, alpha] += delta
+    pos_minus = positions0.clone()
+    pos_minus[kappa, alpha] -= delta
+    H_plus = predict_fn(pos_plus)
+    H_minus = predict_fn(pos_minus)
+    assert H_plus.keys() == H_minus.keys()
+    out = {}
+    for key_str, hp in H_plus.items():
+        d = (np.asarray(hp) - np.asarray(H_minus[key_str])) / (2.0 * delta)
+        # explicit raise, not assert: must survive python -O
+        if not np.isfinite(d).all():
+            raise FloatingPointError(
+                f'nonfinite derivative for hopping {key_str} (atom {kappa}, '
+                f'direction {"xyz"[alpha]}): the model produced nonfinite output')
+        if np.abs(d).max() < grad_threshold:
+            continue
+        p, R, i, j = fold_key(json.loads(key_str), smap)
+        if (p, R) not in out:
+            dtype = np.complex128 if np.iscomplexobj(d) else np.float64
+            out[(p, R)] = np.zeros((norb_tot, norb_tot), dtype=dtype)
+        out[(p, R)][norb_cumsum[i]:norb_cumsum[i + 1],
+                    norb_cumsum[j]:norb_cumsum[j + 1]] = d
+    return out
+
+
 def finite_difference(predict_fn, positions0, smap, norb_cumsum, delta,
                       atom_indices=None, grad_threshold=1e-10):
     r''' central finite differences of predicted hopping blocks w.r.t. displacements
@@ -80,36 +114,46 @@ def finite_difference(predict_fn, positions0, smap, norb_cumsum, delta,
     assert all(0 <= kappa < smap.n_uc_atoms for kappa in atom_indices), \
         f'atom_indices must be 0-based unit-cell atom indices in [0, {smap.n_uc_atoms})'
     norb_cumsum = np.asarray(norb_cumsum)
-    norb_tot = int(norb_cumsum[-1])
     blocks = {}
     for kappa in atom_indices:
         for alpha in range(3):
-            pos_plus = positions0.clone()
-            pos_plus[kappa, alpha] += delta
-            pos_minus = positions0.clone()
-            pos_minus[kappa, alpha] -= delta
-            H_plus = predict_fn(pos_plus)
-            H_minus = predict_fn(pos_minus)
-            assert H_plus.keys() == H_minus.keys()
-            out = {}
-            for key_str, hp in H_plus.items():
-                d = (np.asarray(hp) - np.asarray(H_minus[key_str])) / (2.0 * delta)
-                # explicit raise, not assert: must survive python -O
-                if not np.isfinite(d).all():
-                    raise FloatingPointError(
-                        f'nonfinite derivative for hopping {key_str} (atom {kappa}, '
-                        f'direction {"xyz"[alpha]}): the model produced nonfinite output')
-                if np.abs(d).max() < grad_threshold:
-                    continue
-                p, R, i, j = fold_key(json.loads(key_str), smap)
-                if (p, R) not in out:
-                    dtype = np.complex128 if np.iscomplexobj(d) else np.float64
-                    out[(p, R)] = np.zeros((norb_tot, norb_tot), dtype=dtype)
-                out[(p, R)][norb_cumsum[i]:norb_cumsum[i + 1],
-                            norb_cumsum[j]:norb_cumsum[j + 1]] = d
-            blocks[(kappa, alpha)] = out
+            blocks[(kappa, alpha)] = _fd_one_pair(
+                predict_fn, positions0, smap, norb_cumsum, delta, kappa, alpha,
+                grad_threshold)
     return DerivativeData(n_grid=smap.n_grid, n_uc_atoms=smap.n_uc_atoms, delta=delta,
                           norb_cumsum=norb_cumsum, blocks=blocks)
+
+
+def stream_finite_difference(predict_fn, positions0, smap, norb_cumsum, delta, out_path,
+                             atom_indices=None, grad_threshold=1e-10):
+    r''' central finite differences identical to finite_difference, but each
+    (kappa, alpha) block group is written to out_path (HDF5, dH/{kappa}/{xyz}/{[p+R]}
+    layout) and released immediately, so peak memory is one group instead of all
+    displacements. Returns a read-only H5DerivativeStore over out_path. '''
+    assert np.isfinite(delta) and delta > 0, \
+        'delta must be a positive finite displacement (Angstrom)'
+    if atom_indices is None:
+        atom_indices = list(range(smap.n_uc_atoms))
+    assert all(0 <= kappa < smap.n_uc_atoms for kappa in atom_indices), \
+        f'atom_indices must be 0-based unit-cell atom indices in [0, {smap.n_uc_atoms})'
+    norb_cumsum = np.asarray(norb_cumsum)
+    with h5py.File(out_path, 'w') as f:
+        f['n_grid'] = np.asarray(smap.n_grid, dtype=int)
+        f['n_uc_atoms'] = int(smap.n_uc_atoms)
+        f['delta'] = float(delta)
+        f['norb_cumsum'] = norb_cumsum
+        for kappa in atom_indices:
+            for alpha in range(3):
+                out = _fd_one_pair(predict_fn, positions0, smap, norb_cumsum, delta,
+                                   kappa, alpha, grad_threshold)
+                # require_group so a (kappa, alpha) pair with no surviving blocks
+                # still appears in H5DerivativeStore.pairs(), matching
+                # DerivativeData.pairs() (blocks[(kappa, alpha)] = {} is still a pair)
+                grp = f.require_group(f'dH/{kappa}/{"xyz"[alpha]}')
+                for (p, R), m in out.items():
+                    grp[str(list(p) + list(R))] = m
+                del out
+    return H5DerivativeStore(out_path)
 
 
 def acoustic_sum_rule(deriv):

@@ -126,15 +126,15 @@ def run_epc(config_path, debug=False):
     os.makedirs(out_dir, exist_ok=True)
     fd_scratch, scratch_path = tempfile.mkstemp(dir=out_dir, prefix='epc_dH.', suffix='.h5')
     os.close(fd_scratch)
-    begin = time.time()
-    deriv = stream_finite_difference(predict_fn, positions0, smap, norb_cumsum,
-                                     config.delta, scratch_path,
-                                     atom_indices=config.atom_indices,
-                                     grad_threshold=config.grad_threshold)
-    print(f'Finished {6 * n_displaced} forward passes on the supercell, '
-          f'cost {time.time() - begin:.2f} seconds.')
-
     try:
+        begin = time.time()
+        deriv = stream_finite_difference(predict_fn, positions0, smap, norb_cumsum,
+                                         config.delta, scratch_path,
+                                         atom_indices=config.atom_indices,
+                                         grad_threshold=config.grad_threshold)
+        print(f'Finished {6 * n_displaced} forward passes on the supercell, '
+              f'cost {time.time() - begin:.2f} seconds.')
+
         # delta-convergence report on the first displaced atom
         probe = [config.atom_indices[0]] if config.atom_indices else [0]
         deriv_half = finite_difference(predict_fn, positions0, smap, norb_cumsum,

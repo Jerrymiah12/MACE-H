@@ -88,6 +88,54 @@ def test_write_epc_cartesian_h5_saves_derivatives(tmp_path):
         assert f['dH/0/x/[1, 0, 0, 2, 0, 0]'][()] == pytest.approx(0.5)
 
 
+class CountingDeriv:
+    r''' wraps a derivative source and counts group() fetches, standing in for the
+    per-fetch file read an H5DerivativeStore does '''
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.fetches = 0
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def group(self, kappa, alpha):
+        self.fetches += 1
+        return self.inner.group(kappa, alpha)
+
+
+def test_write_epc_fetches_each_group_once(tmp_path):
+    # a q-major transform refetched the whole store per q-point; one fetch per
+    # (kappa, alpha) is the invariant that keeps stage 2 off the disk
+    deriv = CountingDeriv(make_deriv())
+    struct = Structure(positions=np.array([[0.0, 0.0, 0.0]]),
+                       lattice=3.0 * np.eye(3),
+                       numbers=np.array([79]))
+    qpts = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.25, 0.0, 0.0]])
+    write_epc_cartesian_h5(str(tmp_path / 'epc.h5'), struct, deriv,
+                           np.zeros((2, 3)), qpts, {}, save_derivatives=True)
+    assert deriv.fetches == len(deriv.pairs()) == 3
+
+
+def test_compute_epc_cartesian_fetches_each_group_once():
+    deriv = CountingDeriv(make_deriv())
+    compute_epc_cartesian(deriv, np.zeros((2, 3)), np.zeros((4, 3)))
+    assert deriv.fetches == 3
+
+
+def test_write_epc_chunks_do_not_span_q_or_atom(tmp_path):
+    # partially filled chunks would make every hyperslab write a read-modify-write
+    deriv = make_deriv()
+    struct = Structure(positions=np.array([[0.0, 0.0, 0.0]]),
+                       lattice=3.0 * np.eye(3),
+                       numbers=np.array([79]))
+    path = str(tmp_path / 'epc.h5')
+    write_epc_cartesian_h5(path, struct, deriv, np.zeros((5, 3)), np.zeros((4, 3)), {})
+    with h5py.File(path, 'r') as f:
+        assert f['g_real'].chunks[1:4] == (1, 1, 1)
+        assert f['g_imag'].chunks[1:4] == (1, 1, 1)
+
+
 def test_write_epc_cartesian_h5_failure_leaves_no_partial_file(tmp_path):
     deriv = make_deriv()
     struct = Structure(positions=np.array([[0.0, 0.0, 0.0]]),

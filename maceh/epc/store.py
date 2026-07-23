@@ -32,6 +32,16 @@ class H5DerivativeStore:
                     out.append((int(kappa), 'xyz'.index(a)))
         return sorted(out)
 
+    def nbytes(self):
+        r''' total size of the stored derivative datasets in bytes, read from HDF5
+        metadata only: no block is loaded into memory '''
+        total = 0
+        with h5py.File(self.path, 'r') as f:
+            for kappa in f.get('dH', {}):
+                for a in f[f'dH/{kappa}']:
+                    total += sum(ds.nbytes for ds in f[f'dH/{kappa}/{a}'].values())
+        return total
+
     def group(self, kappa, alpha):
         out = {}
         with h5py.File(self.path, 'r') as f:

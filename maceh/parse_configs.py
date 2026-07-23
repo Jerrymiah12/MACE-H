@@ -317,7 +317,10 @@ class EPCConfig(EvalConfig):
         assert np.isfinite(self.grad_threshold) and self.grad_threshold >= 0, \
             'grad_threshold must be a nonnegative finite number (eV/Angstrom)'
         ai = self._config.get('epc', 'atom_indices')
-        self.atom_indices = [int(x) for x in ai.split()] if ai.strip() else None
+        # dict.fromkeys drops repeats: a duplicated index buys nothing but six extra
+        # forward passes, and collides on the streamed dH dataset name
+        self.atom_indices = (list(dict.fromkeys(int(x) for x in ai.split()))
+                             if ai.strip() else None)
         self.save_derivatives = self._config.getboolean('epc', 'save_derivatives')
         assert self.inference, 'EPC requires inference = True'
         assert self.radius > 0, 'EPC requires [data] radius > 0 (supercell graph cutoff)'

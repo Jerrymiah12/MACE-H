@@ -55,6 +55,10 @@ class DerivativeData:
         r''' {(p, R): dense (norb_tot, norb_tot)} for one (kappa, alpha); {} if absent '''
         return self.blocks.get((kappa, alpha), {})
 
+    def nbytes(self):
+        r''' total size of the stored derivative blocks in bytes '''
+        return sum(m.nbytes for grp in self.blocks.values() for m in grp.values())
+
 
 def hermitize_blocks(H):
     r''' H_ij(R) <- (H_ij(R) + H_ji(-R)^dagger) / 2, matching the symmetrization the
@@ -71,10 +75,25 @@ def hermitize_blocks(H):
     return out
 
 
-def _fd_one_pair(predict_fn, positions0, smap, norb_cumsum, delta, kappa, alpha,
-                 grad_threshold):
+def _displacement_targets(atom_indices, smap):
+    r''' 0-based unit-cell atom indices to displace: every atom when unspecified,
+    otherwise the requested ones with duplicates dropped. A repeated index only
+    repeats six forward passes, and collides on the streamed HDF5 dataset name. '''
+    if atom_indices is None:
+        return list(range(smap.n_uc_atoms))
+    assert all(0 <= kappa < smap.n_uc_atoms for kappa in atom_indices), \
+        f'atom_indices must be 0-based unit-cell atom indices in [0, {smap.n_uc_atoms})'
+    return list(dict.fromkeys(atom_indices))
+
+
+def finite_difference_pair(predict_fn, positions0, smap, norb_cumsum, delta, kappa, alpha,
+                           grad_threshold=1e-10):
     r''' central difference of hopping blocks w.r.t. one (kappa, alpha)
-    displacement, folded to unit-cell labels. Returns {(p, R): dense}. '''
+    displacement, folded to unit-cell labels. Returns {(p, R): dense}. Public so
+    callers that only need a single direction never materialise a whole
+    DerivativeData just to read one group out of it. '''
+    assert np.isfinite(delta) and delta > 0, \
+        'delta must be a positive finite displacement (Angstrom)'
     norb_cumsum = np.asarray(norb_cumsum)
     norb_tot = int(norb_cumsum[-1])
     pos_plus = positions0.clone()
@@ -109,15 +128,11 @@ def finite_difference(predict_fn, positions0, smap, norb_cumsum, delta,
     of home-cell atoms, folded back to unit-cell labels via fold_key '''
     assert np.isfinite(delta) and delta > 0, \
         'delta must be a positive finite displacement (Angstrom)'
-    if atom_indices is None:
-        atom_indices = list(range(smap.n_uc_atoms))
-    assert all(0 <= kappa < smap.n_uc_atoms for kappa in atom_indices), \
-        f'atom_indices must be 0-based unit-cell atom indices in [0, {smap.n_uc_atoms})'
     norb_cumsum = np.asarray(norb_cumsum)
     blocks = {}
-    for kappa in atom_indices:
+    for kappa in _displacement_targets(atom_indices, smap):
         for alpha in range(3):
-            blocks[(kappa, alpha)] = _fd_one_pair(
+            blocks[(kappa, alpha)] = finite_difference_pair(
                 predict_fn, positions0, smap, norb_cumsum, delta, kappa, alpha,
                 grad_threshold)
     return DerivativeData(n_grid=smap.n_grid, n_uc_atoms=smap.n_uc_atoms, delta=delta,
@@ -132,20 +147,16 @@ def stream_finite_difference(predict_fn, positions0, smap, norb_cumsum, delta, o
     displacements. Returns a read-only H5DerivativeStore over out_path. '''
     assert np.isfinite(delta) and delta > 0, \
         'delta must be a positive finite displacement (Angstrom)'
-    if atom_indices is None:
-        atom_indices = list(range(smap.n_uc_atoms))
-    assert all(0 <= kappa < smap.n_uc_atoms for kappa in atom_indices), \
-        f'atom_indices must be 0-based unit-cell atom indices in [0, {smap.n_uc_atoms})'
     norb_cumsum = np.asarray(norb_cumsum)
     with h5py.File(out_path, 'w') as f:
         f['n_grid'] = np.asarray(smap.n_grid, dtype=int)
         f['n_uc_atoms'] = int(smap.n_uc_atoms)
         f['delta'] = float(delta)
         f['norb_cumsum'] = norb_cumsum
-        for kappa in atom_indices:
+        for kappa in _displacement_targets(atom_indices, smap):
             for alpha in range(3):
-                out = _fd_one_pair(predict_fn, positions0, smap, norb_cumsum, delta,
-                                   kappa, alpha, grad_threshold)
+                out = finite_difference_pair(predict_fn, positions0, smap, norb_cumsum,
+                                             delta, kappa, alpha, grad_threshold)
                 # require_group so a (kappa, alpha) pair with no surviving blocks
                 # still appears in H5DerivativeStore.pairs(), matching
                 # DerivativeData.pairs() (blocks[(kappa, alpha)] = {} is still a pair)

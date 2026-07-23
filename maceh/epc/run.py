@@ -10,8 +10,8 @@ from ..kernel import DeepHE3Kernel, NetOutInfo
 from ..graph import Collater, get_edge_fea
 from ..parse_configs import EPCConfig
 from .supercell import load_structure, build_supercell, uniform_grid
-from .derivative import (build_supercell_graph, finite_difference, stream_finite_difference,
-                         acoustic_sum_rule, hermitize_blocks)
+from .derivative import (build_supercell_graph, finite_difference_pair,
+                         stream_finite_difference, acoustic_sum_rule, hermitize_blocks)
 from .assemble import write_epc_cartesian_h5
 
 
@@ -135,15 +135,16 @@ def run_epc(config_path, debug=False):
         print(f'Finished {6 * n_displaced} forward passes on the supercell, '
               f'cost {time.time() - begin:.2f} seconds.')
 
-        # delta-convergence report on the first displaced atom
-        probe = [config.atom_indices[0]] if config.atom_indices else [0]
-        deriv_half = finite_difference(predict_fn, positions0, smap, norb_cumsum,
-                                       config.delta / 2, atom_indices=probe,
-                                       grad_threshold=config.grad_threshold)
+        # delta-convergence report on the first displaced atom, one Cartesian
+        # direction at a time so at most one half-delta and one full-delta group
+        # are resident at once
+        probe = config.atom_indices[0] if config.atom_indices else 0
         dev = 0.0
         for alpha in range(3):
-            full = deriv.group(probe[0], alpha)
-            half = deriv_half.group(probe[0], alpha)
+            half = finite_difference_pair(predict_fn, positions0, smap, norb_cumsum,
+                                          config.delta / 2, probe, alpha,
+                                          grad_threshold=config.grad_threshold)
+            full = deriv.group(probe, alpha)
             for pR in set(full) | set(half):
                 a = full.get(pR)
                 b = half.get(pR)
@@ -153,6 +154,7 @@ def run_epc(config_path, debug=False):
                     dev = max(dev, float(np.abs(a).max()))
                 else:
                     dev = max(dev, float(np.abs(a - b).max()))
+            del half, full
         print(f'delta-convergence: max |dH(delta) - dH(delta/2)| = {dev:.3e} eV/A '
               f'(delta = {config.delta} A)')
         if config.atom_indices is None:

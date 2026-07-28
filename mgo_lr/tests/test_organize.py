@@ -33,6 +33,43 @@ def test_grouped_split_integrity_and_determinism():
     assert s3 != s1                                        # seed-dependent
 
 
+def test_holdout_groups_unions_shared_qvector():
+    metas = {
+        "s1": {"pattern_group_id": "g1", "q_vectors": [[1, 0, 0]]},
+        "s2": {"pattern_group_id": "g2", "q_vectors": [[1, 0, 0]]},   # shares q
+        "s3": {"pattern_group_id": "g3", "q_vectors": [[0, 1, 0]]},
+        "s4": {"pattern_group_id": "g4", "q_vectors": [[-1, 0, 0]]},  # -q of s1
+        "s5": {"pattern_group_id": "g5", "q_vectors": []},            # q-less
+    }
+    groups = organize.holdout_groups(metas)
+    g_of = {sid: gk for gk, sids in groups.items() for sid in sids}
+    assert g_of["s1"] == g_of["s2"] == g_of["s4"]     # same ±q shell
+    assert g_of["s3"] != g_of["s1"]
+    assert g_of["s5"] != g_of["s1"]                    # q-less stands alone
+    assert sorted(sid for sids in groups.values() for sid in sids) == \
+        ["s1", "s2", "s3", "s4", "s5"]                 # partition
+
+
+def test_split_has_no_qvector_leakage():
+    # P1 regression: build_main gives each snapshot a unique pattern_group_id,
+    # so grouping by it scattered shared q-vectors across train/val/test.  A
+    # q-vector-family holdout must keep every ±q shell inside one subset.
+    qpool = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0]]
+    metas = {f"snapshot_{i + 1:06d}": {"pattern_group_id": f"grp-{i:03d}",
+                                       "q_vectors": [qpool[i % len(qpool)]]}
+             for i in range(24)}
+    groups = organize.holdout_groups(metas)
+    splits = organize.grouped_split(groups, 0.25, 0.25, 7)
+    subset_qs = {name: {organize._canonical_q(q)
+                        for sid in sids for q in metas[sid]["q_vectors"]}
+                 for name, sids in splits.items()}
+    subsets = ["train", "validation", "test"]
+    for a in range(len(subsets)):
+        for b in range(a + 1, len(subsets)):
+            assert subset_qs[subsets[a]].isdisjoint(subset_qs[subsets[b]]), \
+                (subsets[a], subsets[b])
+
+
 def _mk_main(ws, n_groups=4, per_group=2):
     store = SnapshotStore(ws, "main")
     k = 1

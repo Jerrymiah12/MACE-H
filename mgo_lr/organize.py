@@ -18,6 +18,53 @@ from .displacements import MODE_NORMALIZATION
 from .snapshot import SnapshotStore, set_dir_name
 
 
+def _canonical_q(q):
+    """Sign-canonical integer q so q and -q share one holdout unit."""
+    q = tuple(int(x) for x in q)
+    for c in q:
+        if c > 0:
+            return q
+        if c < 0:
+            return tuple(-x for x in q)
+    return q                              # all-zero
+
+
+def holdout_groups(metas):
+    """Atomic holdout units: union any snapshots that share a q-vector
+    (sign-canonicalized, so a ±q shell is one unit) or a pattern_group_id
+    (sign/amplitude partners).  Because whole units are assigned to a single
+    subset, no q-vector or q-shell can straddle train/val/test.  Snapshots with
+    no q-vector (equilibrium, random_local, near_equilibrium) leak nothing and
+    are grouped by pattern_group_id alone.
+    """
+    parent = {sid: sid for sid in metas}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    buckets = {}
+    for sid, m in metas.items():
+        for q in m.get("q_vectors") or []:
+            buckets.setdefault(("q", _canonical_q(q)), []).append(sid)
+        pg = m.get("pattern_group_id")
+        if pg is not None:
+            buckets.setdefault(("pg", pg), []).append(sid)
+    for members in buckets.values():
+        for other in members[1:]:
+            union(members[0], other)
+
+    groups = {}
+    for sid in metas:
+        groups.setdefault(find(sid), []).append(sid)
+    return {root: sorted(sids) for root, sids in groups.items()}
+
+
 def grouped_split(groups, val_frac, test_frac, seed):
     gids = sorted(groups)
     rng = np.random.default_rng([int(seed), 777001])
@@ -80,19 +127,19 @@ def organize_stage(cfg, workspace, args):
     seed = cfg["displacements"]["seed"]
     stores = {name: SnapshotStore(workspace, name)
               for name in ("pilot", "main", "large")}
-    groups = {}
+    metas = {}
     for sid in _validated(stores["main"]):
         with open(os.path.join(stores["main"].folder(sid),
                                "displacement_metadata.json")) as f:
-            gid = json.load(f)["pattern_group_id"]
-        groups.setdefault(gid, []).append(sid)
+            metas[sid] = json.load(f)
+    groups = holdout_groups(metas)
     splits = grouped_split(groups,
                            float(cfg["splits"]["validation_fraction"]),
                            float(cfg["splits"]["test_fraction"]), seed)
     doc = {"seed": seed,
            "validation_fraction": float(cfg["splits"]["validation_fraction"]),
            "test_fraction": float(cfg["splits"]["test_fraction"]),
-           "grouping": "pattern_group_id",
+           "grouping": "q_vector_family (shared ±q shells + pattern groups)",
            "main": splits,
            "pilot": sorted(_validated(stores["pilot"])),
            "large_test": sorted(_validated(stores["large"]))}

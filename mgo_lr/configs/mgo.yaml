@@ -77,6 +77,8 @@ validation:
 
 locality:
   bin_width: 1.0            # Angstrom, distance bin for block-norm statistics
+  tail_floor: 1.0e-6        # ignore long-distance radii where F_full is ~0
+  min_tail_improvement: 0.05  # H_SR tail must be >=5% below H_full to PASS
 
 splits:
   validation_fraction: 0.10

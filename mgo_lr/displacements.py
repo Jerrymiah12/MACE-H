@@ -205,11 +205,23 @@ def build_pilot(cfg, prim_cell):
     return plans
 
 
+def fold_q(q, n):
+    """Canonicalize integer reciprocal indices into the centered interval
+    (-n/2, n/2].  Folding leaves the commensurate displacement field unchanged
+    (q·R differs by 2π·integer on every lattice site) but gives the TRUE
+    wavevector direction and magnitude: a raw index of n-1 means the -1
+    direction, not the +(n-1) direction.  All directions, magnitudes,
+    polarizations, metadata, and family identities must be computed from the
+    folded vector."""
+    n = int(n)
+    return [int(((int(c) + n // 2) % n) - n // 2) for c in q]
+
+
 def _random_q(rng, n):
     while True:
         q = [int(rng.integers(0, n)) for _ in range(3)]
         if any(q):
-            return q
+            return fold_q(q, n)
 
 
 def _low_q(rng, n):
@@ -217,7 +229,7 @@ def _low_q(rng, n):
     while True:
         q = [int(rng.choice([0, 1, n - 1])) for _ in range(3)]
         if any(q):
-            return q
+            return fold_q(q, n)
 
 
 def _single_q_pattern(rng, rec_super, q_int, amp, pattern_class):
@@ -352,6 +364,8 @@ def gen_structures_stage(cfg, workspace, args):
     written = 0
     for plan in plans:
         sid, folder = plan["sid"], store.folder(plan["sid"])
+        if store.is_rejected(sid):
+            continue                       # never recreate a rejected snapshot
         if os.path.isdir(folder):
             if not args.force:
                 continue
@@ -389,8 +403,9 @@ def gen_structures_stage(cfg, workspace, args):
                           json.dumps(meta, indent=1))
         store.write_status(sid, "prepared", set_name=args.set_name)
         written += 1
-    abacus_io.write_job_script(os.path.join(store.set_dir, "job_abacus.sh"),
-                               cfg, [p["sid"] for p in plans])
+    abacus_io.write_job_script(
+        os.path.join(store.set_dir, "job_abacus.sh"), cfg,
+        [p["sid"] for p in plans if not store.is_rejected(p["sid"])])
     print(f"{args.set_name}: wrote {written} snapshots "
           f"({len(plans) - written} skipped)")
     return 0

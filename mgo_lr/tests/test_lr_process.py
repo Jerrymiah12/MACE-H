@@ -61,11 +61,26 @@ def test_lr_process_equilibrium_zero(tmp_path):
     assert ld["sign_convention"] == "electron_potential_energy"
     assert ld["phase_convention"] == "reference_positions"
     assert ld["reciprocal_set"]["inversion_symmetric"] is True
-    assert ld["reciprocal_set"]["number_of_vectors"] > 0
+    assert meta["reciprocal_set"]["number_of_vectors"] > 0   # realized count
     assert meta["r_imag"] < cfg["lr"]["imaginary_tolerance"]
     assert store.read_status(sid)["state"] == "lr_done"
     ws_meta = yaml.safe_load(open(os.path.join(ws, "metadata.yaml")))
     assert ws_meta["lr_definition"]["ewald_lambda"] == 1.0
+
+
+def test_workspace_lr_definition_is_cell_size_invariant(tmp_path):
+    # P0 regression: the reciprocal-vector count depends on supercell size, so
+    # embedding it in the workspace compatibility key makes processing a second
+    # set (e.g. main after pilot) abort as a "different lr_definition".  The
+    # workspace key must contain only cell-invariant physical parameters; the
+    # realized count belongs in per-snapshot provenance instead.
+    ws, cfg, store, sid, sc = converted_snapshot(tmp_path)
+    assert lr.lr_process_stage(cfg, ws, Args()) == 0
+    stored = yaml.safe_load(open(os.path.join(ws, "metadata.yaml")))["lr_definition"]
+    assert "number_of_vectors" not in stored["reciprocal_set"]
+    meta = json.load(open(os.path.join(store.folder(sid), "lr_metadata.json")))
+    assert meta["reciprocal_set"]["number_of_vectors"] > 0
+    assert meta["reciprocal_set"]["inversion_symmetric"] is True
 
 
 def test_lr_process_translation_zero(tmp_path):

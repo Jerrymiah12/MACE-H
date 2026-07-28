@@ -40,6 +40,25 @@ def test_odd_response_perfect_match():
     assert abs(out2["cos_theta"] + 1.0) < 1e-9
 
 
+def test_locality_equal_tails_is_not_a_pass():
+    # P1 regression: identical SR and full tails = NO localization improvement,
+    # yet `s <= f + 1e-12` accepted it.  Equality must not PASS.
+    f_full = [0.9, 0.7, 0.5, 0.3]
+    assert locality.long_range_localizes(f_full, list(f_full), 1e-6, 0.05) is False
+
+
+def test_locality_measurable_improvement_passes():
+    f_full = [0.9, 0.7, 0.5, 0.3]
+    f_sr = [0.9, 0.7, 0.20, 0.10]          # >5% lower in the long-distance half
+    assert locality.long_range_localizes(f_full, f_sr, 1e-6, 0.05) is True
+
+
+def test_locality_all_zero_long_range_is_not_a_pass():
+    # radii beyond the largest nonzero block: both zero, no evidence -> not PASS
+    f_full = [0.5, 0.2, 0.0, 0.0]
+    assert locality.long_range_localizes(f_full, list(f_full), 1e-6, 0.05) is False
+
+
 def test_locality_report_stage(tmp_path):
     ws, cfg, store = ladder_workspace(tmp_path)
     assert validate.validate_stage(cfg, ws, Args()) == 0

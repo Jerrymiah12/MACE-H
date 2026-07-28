@@ -93,6 +93,24 @@ def test_gen_structures_force_protects_dft_output(tmp_path):
     assert len(store.read_status(other)["history"]) == 2
 
 
+def test_rejected_snapshot_not_regenerated(tmp_path):
+    # P1 regression: rejecting a snapshot moves it to rejected/<set>_<sid>, but
+    # gen-structures only checked the active set dir, so the rejected id
+    # reappeared in `prepared` state on the next run (and a later re-rejection
+    # would collide with the existing rejected destination).
+    ws = str(tmp_path)
+    make_fake_reference(ws)
+    dp.gen_structures_stage(CFG, ws, Args())
+    store = SnapshotStore(ws, "pilot")
+    sid = store.list()[0]
+    store.reject(sid, "synthetic")
+    assert sid not in store.list()                       # moved out
+    assert store.is_rejected(sid)
+    dp.gen_structures_stage(CFG, ws, Args())             # rerun
+    assert sid not in store.list()                       # must stay rejected
+    assert not os.path.isdir(store.folder(sid))
+
+
 def test_cli_requires_reference(tmp_path):
     r = subprocess.run([sys.executable, "-m", "mgo_lr", "gen-structures",
                         "--workspace", str(tmp_path), "--set", "pilot"],

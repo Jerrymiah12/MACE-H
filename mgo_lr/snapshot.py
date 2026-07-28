@@ -59,12 +59,18 @@ class SnapshotStore:
             return True   # never reprocess rejected snapshots
         return STATES.index(s) >= STATES.index(state)
 
+    def rejected_path(self, sid):
+        return os.path.join(self.rejected_dir, f"{self.set_name}_{sid}")
+
+    def is_rejected(self, sid):
+        """True if this set's `sid` was previously rejected (and archived).
+        gen-structures must consult this so a rejected id is never recreated."""
+        return os.path.isdir(self.rejected_path(sid))
+
     def reject(self, sid, reason):
         self.write_status(sid, "rejected", reason=reason)
         os.makedirs(self.rejected_dir, exist_ok=True)
-        shutil.move(self.folder(sid),
-                    os.path.join(self.rejected_dir,
-                                 f"{self.set_name}_{sid}"))
+        shutil.move(self.folder(sid), self.rejected_path(sid))
 
 
 def load_reference(workspace):

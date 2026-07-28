@@ -146,6 +146,43 @@ def test_build_main_composition_and_seeding():
     assert all(by_sid[m["sign_partner_id"]]["sign_partner_id"] for m in pairs)
 
 
+def test_fold_q_centers_indices():
+    # a raw index of n-1 is the -1 direction, not +(n-1)
+    assert dp.fold_q([2, 1, 0], 3) == [-1, 1, 0]
+    assert dp.fold_q([0, 1, 2], 3) == [0, 1, -1]
+    assert dp.fold_q([3, 2, 1], 4) == [-1, -2, 1]
+    once = dp.fold_q([2, 2, 2], 3)
+    assert dp.fold_q(once, 3) == once            # idempotent
+
+
+def test_generated_q_vectors_are_canonical():
+    # P0 regression: _low_q/_random_q returned raw indices (n-1 for -1), so the
+    # unfolded vector drove qhat/polarization/q_magnitude in the WRONG Cartesian
+    # direction.  Every stored q_int must lie in the centered reciprocal
+    # interval so downstream directions and magnitudes are physical.
+    for build, key in ((dp.build_main, "main"), (dp.build_large, "large")):
+        n = CFG["supercells"][key]
+        for p in build(CFG, PRIM_CELL):
+            for q in p["metadata"]["q_vectors"]:
+                for c in q:
+                    assert -(n // 2) <= c <= n // 2, (key, n, q)
+
+
+def test_longitudinal_polarization_parallel_to_folded_q():
+    # a longitudinal single-q mode's polarization must be parallel to the
+    # folded wavevector direction, including when the raw draw was n-1.
+    n = CFG["supercells"]["large"]
+    rec_super = reciprocal(np.asarray(PRIM_CELL, float) * n)
+    for p in dp.build_large(CFG, PRIM_CELL):
+        for m in p["pattern"]["modes"]:
+            if m["polarization_class"] != "longitudinal":
+                continue
+            qhat = np.asarray(m["q_int"], float) @ rec_super
+            qhat = qhat / np.linalg.norm(qhat)
+            cos = abs(float(np.dot(qhat, m["polarization"])))
+            assert cos > 1.0 - 1e-9, (m["q_int"], cos)
+
+
 def test_build_large():
     plans = dp.build_large(CFG, PRIM_CELL)
     assert len(plans) == CFG["displacements"]["large_count"]

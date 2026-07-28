@@ -47,11 +47,21 @@ def test_export_full_from_converted_only(tmp_path):
     assert export.export_target_stage(cfg, ws, _args("full")) == 0
     f = store.folder(sid)
     assert os.path.exists(os.path.join(f, "hamiltonians.h5"))
-    # lr/sr export skips converted-only snapshots instead of failing
-    assert export.export_target_stage(cfg, ws, _args("sr")) == 0
-    got = convert.read_blocks(os.path.join(f, "hamiltonians.h5"))
-    want = convert.read_blocks(os.path.join(f, "hamiltonians_full.h5"))
-    assert lr.blocks_diff_norm(got, want) == 0.0             # unchanged
+
+
+def test_export_sr_refuses_partial_dataset(tmp_path):
+    # P1 regression: export is all-or-nothing.  With a snapshot only `converted`
+    # (no sr source), requesting sr must fail and change NOTHING — never
+    # silently skip it and advertise a mixed dataset as uniform sr.
+    ws, cfg, store, sid, sc = converted_snapshot(tmp_path)   # no lr-process
+    assert export.export_target_stage(cfg, ws, _args("full")) == 0
+    f = store.folder(sid)
+    full_before = sha256_file(os.path.join(f, "hamiltonians.h5"))
+    with pytest.raises(SystemExit, match="all-or-nothing"):
+        export.export_target_stage(cfg, ws, _args("sr"))
+    assert sha256_file(os.path.join(f, "hamiltonians.h5")) == full_before
+    meta = yaml.safe_load(open(os.path.join(ws, "metadata.yaml")))
+    assert meta["training_target"] == "full"                 # target unchanged
 
 
 def test_export_refuses_foreign_file(tmp_path):

@@ -170,6 +170,70 @@ def test_validate_rejects_broken_hermiticity_and_rlat(tmp_path):
     assert "rlat" in _rejected_reason(ws, sid_r)
 
 
+def test_validate_rejects_wrong_element(tmp_path):
+    # adversarial repro: element.dat changed from Mg/O to H/H must be rejected,
+    # not silently validated.
+    ws, cfg, store = ladder_workspace(tmp_path)
+    sid = store.list()[0]
+    with open(os.path.join(store.folder(sid), "element.dat"), "w") as f:
+        f.write("1\n1\n")
+    assert validate.validate_stage(cfg, ws, Args()) == 1
+    assert "element" in _rejected_reason(ws, sid)
+
+
+def test_validate_rejects_broken_reciprocal_set(tmp_path):
+    # adversarial repro: a recorded reciprocal set marked not inversion-symmetric
+    # (realness of V^LR depends on it) must be rejected.
+    ws, cfg, store = ladder_workspace(tmp_path)
+    sid = store.list()[0]
+    p = os.path.join(store.folder(sid), "lr_metadata.json")
+    meta = json.load(open(p))
+    meta["reciprocal_set"]["inversion_symmetric"] = False
+    meta["reciprocal_set"]["ok"] = False
+    with open(p, "w") as f:
+        json.dump(meta, f)
+    assert validate.validate_stage(cfg, ws, Args()) == 1
+    assert "reciprocal_set" in _rejected_reason(ws, sid)
+
+
+def test_validate_rejects_lr_definition_mismatch(tmp_path):
+    ws, cfg, store = ladder_workspace(tmp_path)
+    sid = store.list()[0]
+    p = os.path.join(store.folder(sid), "lr_metadata.json")
+    meta = json.load(open(p))
+    meta["lr_definition"]["ewald_lambda"] = 999.0
+    with open(p, "w") as f:
+        json.dump(meta, f)
+    assert validate.validate_stage(cfg, ws, Args()) == 1
+    assert "lr_definition" in _rejected_reason(ws, sid)
+
+
+def test_validate_rejects_wrong_lattice(tmp_path):
+    # a self-consistent but wrong cell (lat and rlat scaled together so
+    # rlat^T lat = 2 pi I still holds) must fail full-lattice agreement.
+    ws, cfg, store = ladder_workspace(tmp_path)
+    sid = store.list()[0]
+    folder = store.folder(sid)
+    lat_p = os.path.join(folder, "lat.dat")
+    rlat_p = os.path.join(folder, "rlat.dat")
+    np.savetxt(lat_p, 1.05 * np.loadtxt(lat_p))
+    np.savetxt(rlat_p, np.loadtxt(rlat_p) / 1.05)
+    assert validate.validate_stage(cfg, ws, Args()) == 1
+    assert "lat" in _rejected_reason(ws, sid)
+
+
+def test_validate_rejects_position_mismatch(tmp_path):
+    # DFT positions that do not equal reference + recorded displacement.
+    ws, cfg, store = ladder_workspace(tmp_path)
+    sid = store.list()[0]
+    p = os.path.join(store.folder(sid), "site_positions.dat")
+    pos = np.loadtxt(p)
+    pos[0, 0] += 0.3
+    np.savetxt(p, pos)
+    assert validate.validate_stage(cfg, ws, Args()) == 1
+    assert "position" in _rejected_reason(ws, sid)
+
+
 def test_validate_tier2_enforce_flags_violation(tmp_path):
     ws, cfg, store = ladder_workspace(tmp_path)
     sid = "snapshot_000001"                  # the +0.01 member

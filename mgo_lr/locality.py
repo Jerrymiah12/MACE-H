@@ -64,6 +64,22 @@ def binned_norms(blocks, cart, cell, bin_width):
             for b, ns in sorted(bins.items())]
 
 
+def long_range_localizes(f_full, f_sr, floor, min_improvement):
+    """Dataset-level approval criterion for `H^SR` localization.
+
+    Over the long-distance half of the radius grid, and only where `H_full`
+    still carries meaningful weight (`F_full > floor` — radii past the largest
+    nonzero block are all-zero and carry no evidence), `F_SR` must be *measurably*
+    below `F_full` (by at least `min_improvement`, relatively).  Equality is NOT
+    a pass: a subtracted-LR Hamiltonian with the same tail as the full one shows
+    no localization gain.
+    """
+    n = len(f_full)
+    pairs = [(f_sr[i], f_full[i]) for i in range(n // 2, n) if f_full[i] > floor]
+    return bool(pairs) and all(s <= f * (1.0 - min_improvement)
+                               for s, f in pairs)
+
+
 def locality_report_stage(cfg, workspace, args):
     if getattr(args, "set_name", None) is None:
         raise SystemExit("locality-report requires --set pilot|main|large")
@@ -75,42 +91,55 @@ def locality_report_stage(cfg, workspace, args):
     if not sids:
         print(f"{args.set_name}: no validated snapshots; nothing to report")
         return 0
-    metas, h_full, h_lr, h_sr = {}, {}, {}, {}
+    def blocks(sid, kind):
+        return read_blocks(os.path.join(store.folder(sid),
+                                        f"hamiltonians_{kind}.h5"))
+
+    # Radius grid, cell, and per-snapshot binned stats come from the first
+    # validated snapshot; load its blocks once and release them.
+    folder0 = store.folder(sids[0])
+    cell = np.loadtxt(os.path.join(folder0, "lat.dat")).T   # columns -> rows
+    cart0 = np.loadtxt(os.path.join(folder0, "site_positions.dat")).T
+    h_full0 = blocks(sids[0], "full")
+    rmax = max(block_distance(k, cart0, cell) for k in h_full0)
+    radii = [bin_width * i for i in range(1, int(rmax // bin_width) + 2)]
+    binned = {"full": binned_norms(h_full0, cart0, cell, bin_width),
+              "lr": binned_norms(blocks(sids[0], "lr"), cart0, cell, bin_width),
+              "sr": binned_norms(blocks(sids[0], "sr"), cart0, cell, bin_width)}
+    del h_full0
+
+    # Stream one snapshot at a time: accumulate tail fractions and the scalar
+    # H_LR norms, holding only the current snapshot's blocks in memory (the
+    # planned 400-structure set would need many GB if held all at once).
+    metas, lr_norms = {}, {}
+    tails = {"full": [], "lr": [], "sr": []}
     for sid in sids:
         folder = store.folder(sid)
         with open(os.path.join(folder, "displacement_metadata.json")) as f:
             metas[sid] = json.load(f)
-        h_full[sid] = read_blocks(os.path.join(folder, "hamiltonians_full.h5"))
-        h_lr[sid] = read_blocks(os.path.join(folder, "hamiltonians_lr.h5"))
-        h_sr[sid] = read_blocks(os.path.join(folder, "hamiltonians_sr.h5"))
-
-    folder0 = store.folder(sids[0])
-    cell = np.loadtxt(os.path.join(folder0, "lat.dat")).T   # columns -> rows
-    cart0 = np.loadtxt(os.path.join(folder0, "site_positions.dat")).T
-    rmax = max(block_distance(k, cart0, cell) for k in h_full[sids[0]])
-    radii = [bin_width * i for i in range(1, int(rmax // bin_width) + 2)]
-
-    tails = {"full": [], "lr": [], "sr": []}
-    for sid in sids:
-        cart = np.loadtxt(os.path.join(store.folder(sid),
-                                       "site_positions.dat")).T
-        tails["full"].append(tail_fractions(h_full[sid], cart, cell, radii))
-        tails["lr"].append(tail_fractions(h_lr[sid], cart, cell, radii))
-        tails["sr"].append(tail_fractions(h_sr[sid], cart, cell, radii))
+        cart = np.loadtxt(os.path.join(folder, "site_positions.dat")).T
+        hl = blocks(sid, "lr")
+        tails["full"].append(tail_fractions(blocks(sid, "full"), cart, cell,
+                                            radii))
+        tails["lr"].append(tail_fractions(hl, cart, cell, radii))
+        tails["sr"].append(tail_fractions(blocks(sid, "sr"), cart, cell, radii))
+        lr_norms[sid] = blocks_norm(hl)
     f_mean = {k: np.mean(np.array(v), axis=0).tolist()
               for k, v in tails.items()}
-    upper = slice(len(radii) // 2, None)      # long-distance region
-    f_sr_ok = bool(all(s <= f + 1e-12 for s, f in
-                       zip(f_mean["sr"][upper], f_mean["full"][upper])))
+    f_sr_ok = long_range_localizes(
+        f_mean["full"], f_mean["sr"],
+        float(cfg["locality"].get("tail_floor", 1e-6)),
+        float(cfg["locality"].get("min_tail_improvement", 0.05)))
 
+    # Odd-response pairs: load only the ± pair members' blocks, momentarily.
     odd = []
     for sid in sids:
         m = metas[sid]
         partner = m.get("sign_partner_id")
         amp = float(m.get("amplitude") or 0.0)
         if partner in metas and amp > 0.0:
-            entry = odd_response(h_full[sid], h_full[partner], h_lr[sid],
-                                 delta)
+            entry = odd_response(blocks(sid, "full"), blocks(partner, "full"),
+                                 blocks(sid, "lr"), delta)
             entry.update({"sids": [sid, partner], "amplitude": amp,
                           "family": m.get("comparison_family_id")})
             odd.append(entry)
@@ -124,7 +153,7 @@ def locality_report_stage(cfg, workspace, args):
         fam["members"].append({
             "sid": sid, "polarization_class": m.get("polarization_class"),
             "amplitude": m.get("amplitude"),
-            "lr_norm": blocks_norm(h_lr[sid])})
+            "lr_norm": lr_norms[sid]})
     for fam in families.values():
         by_class = {}
         for e in fam["members"]:
@@ -137,12 +166,7 @@ def locality_report_stage(cfg, workspace, args):
               "tail": {"radii": radii, "F_full": f_mean["full"],
                        "F_lr": f_mean["lr"], "F_sr": f_mean["sr"],
                        "f_sr_below_f_full": f_sr_ok},
-              "binned": {"full": binned_norms(h_full[sids[0]], cart0, cell,
-                                              bin_width),
-                         "lr": binned_norms(h_lr[sids[0]], cart0, cell,
-                                            bin_width),
-                         "sr": binned_norms(h_sr[sids[0]], cart0, cell,
-                                            bin_width)},
+              "binned": binned,
               "odd_response": odd, "families": families}
     out_dir = os.path.join(workspace, "generation_logs", "locality")
     os.makedirs(out_dir, exist_ok=True)

@@ -12,9 +12,10 @@ import os
 import numpy as np
 
 from .config import atomic_write_text, sha256_file
+from .constants import ATOMIC_NUMBERS
 from .convert import key_str, parse_key, read_blocks, species_orbital_info
 from .displacements import remove_uniform_translation
-from .lr import blocks_diff_norm, blocks_norm
+from .lr import blocks_diff_norm, blocks_norm, minimum_image_displacements
 from .snapshot import SnapshotStore, load_reference
 from .structures import make_supercell
 
@@ -52,7 +53,7 @@ def check_keys_and_dims(blocks, norb):
     return None
 
 
-def tier1_snapshot(cfg, folder, status, sc, born):
+def tier1_snapshot(cfg, folder, status, sc, born, ws_lr_def=None):
     val = cfg["validation"]
     delta = float(val["delta"])
     failures, metrics = [], {}
@@ -69,7 +70,7 @@ def tier1_snapshot(cfg, folder, status, sc, born):
         if not os.path.exists(p) or sha256_file(p) != digest:
             failures.append(f"raw_dft_modified: {name}")
 
-    _, norb, _ = species_orbital_info(cfg, sc.species)
+    types, norb, _ = species_orbital_info(cfg, sc.species)
     h_full = read_blocks(os.path.join(folder, "hamiltonians_full.h5"))
     h_lr = read_blocks(os.path.join(folder, "hamiltonians_lr.h5"))
     h_sr = read_blocks(os.path.join(folder, "hamiltonians_sr.h5"))
@@ -83,9 +84,22 @@ def tier1_snapshot(cfg, folder, status, sc, born):
         return failures, metrics
 
     ot = open(os.path.join(folder, "orbital_types.dat")).read().splitlines()
-    if len(ot) != len(sc.species):
-        failures.append(f"orbital_types.dat has {len(ot)} lines for "
-                        f"{len(sc.species)} atoms")
+    expected_ot = ["  ".join(str(l) for l in t) for t in types]
+    if [line.strip() for line in ot] != [line.strip() for line in expected_ot]:
+        failures.append("orbital_types.dat contents disagree with the "
+                        "species-major orbital layout")
+
+    # element.dat: atomic numbers, one per atom, in the fixed species-major
+    # order — the adversarial Mg->H swap must be caught here.
+    expected_z = [ATOMIC_NUMBERS[s] for s in sc.species]
+    try:
+        got_z = [int(round(x)) for x in
+                 np.atleast_1d(np.loadtxt(os.path.join(folder, "element.dat")))]
+    except (ValueError, OSError):
+        got_z = None
+    if got_z != expected_z:
+        failures.append(f"element.dat {got_z} != expected {expected_z}")
+
     info = json.load(open(os.path.join(folder, "info.json")))
     if (info.get("isspinful") is not False
             or info.get("nsites") != len(sc.species)
@@ -95,6 +109,18 @@ def tier1_snapshot(cfg, folder, status, sc, born):
     rlat = np.loadtxt(os.path.join(folder, "rlat.dat"))
     if not np.allclose(rlat.T @ lat, 2.0 * np.pi * np.eye(3), atol=1e-8):
         failures.append("rlat/lat convention violated (need rlat^T lat = 2 pi I)")
+    # full lattice agreement with the expected supercell, not merely internal
+    # rlat/lat consistency (a jointly-scaled cell would otherwise slip through)
+    if not np.allclose(lat.T, sc.cell, atol=1e-6):
+        failures.append("lat.dat disagrees with the expected supercell lattice")
+    # DFT positions must equal reference geometry + the recorded displacement
+    pos = np.loadtxt(os.path.join(folder, "site_positions.dat")).T
+    u_stored = np.load(os.path.join(folder, "displacements.npy"))
+    pos_err = float(np.abs(
+        minimum_image_displacements(sc.cell, pos, sc.cart) - u_stored).max())
+    metrics["position_reference_error"] = pos_err
+    if pos_err > float(val.get("tau_position", 1e-6)):
+        failures.append(f"site_positions vs reference mismatch = {pos_err:.3e}")
     tau_diag = float(val["tau_overlap_diag"])
     for i in range(len(sc.species)):
         k = key_str((0, 0, 0), i, i)
@@ -118,6 +144,13 @@ def tier1_snapshot(cfg, folder, status, sc, born):
         failures.append(f"reconstruction_error = {rec_err:.3e}")
 
     lr_meta = json.load(open(os.path.join(folder, "lr_metadata.json")))
+    rec = lr_meta.get("reciprocal_set", {})
+    if not (rec.get("ok") and rec.get("inversion_symmetric")
+            and rec.get("excludes_G_zero") and rec.get("no_duplicates")
+            and int(rec.get("number_of_vectors", 0)) > 0):
+        failures.append(f"reciprocal_set not verifiably sound: {rec}")
+    if ws_lr_def is not None and lr_meta.get("lr_definition") != ws_lr_def:
+        failures.append("lr_definition disagrees with workspace metadata.yaml")
     metrics["r_imag"] = lr_meta["r_imag"]
     metrics["lr_convergence"] = lr_meta["lr_convergence"]
     if lr_meta["r_imag"] >= float(cfg["lr"]["imaginary_tolerance"]):
@@ -207,6 +240,12 @@ def validate_stage(cfg, workspace, args):
                                 "born_effective_charges.npy"))
     sc = make_supercell(ref["prim_cell"], ref["frac"], ref["species"],
                         cfg["supercells"][args.set_name])
+    ws_meta_path = os.path.join(workspace, "metadata.yaml")
+    ws_lr_def = None
+    if os.path.exists(ws_meta_path):
+        import yaml
+        with open(ws_meta_path) as f:
+            ws_lr_def = (yaml.safe_load(f) or {}).get("lr_definition")
     store = SnapshotStore(workspace, args.set_name)
     exit_code, results = 0, {}
     for sid in store.list():
@@ -215,7 +254,7 @@ def validate_stage(cfg, workspace, args):
                 or not store.state_at_least(sid, "lr_done"):
             continue
         failures, metrics = tier1_snapshot(cfg, store.folder(sid), st, sc,
-                                           born)
+                                           born, ws_lr_def)
         qc = {"tier1": {"failures": failures, "metrics": metrics}}
         atomic_write_text(os.path.join(store.folder(sid),
                                        "quality_checks.json"),

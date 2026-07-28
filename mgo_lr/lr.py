@@ -126,14 +126,20 @@ def blocks_diff_norm(a, b):
     return float(np.sqrt(tot))
 
 
-def _lr_definition(cfg, gmax_sq, rep):
+def _lr_definition(cfg, gmax_sq):
+    """Cell-invariant physical LR definition — the workspace compatibility key.
+
+    The reciprocal-vector *count* depends on the supercell size and therefore
+    is deliberately NOT part of this key (it is recorded per snapshot instead):
+    including it would make one processed set reject every other cell size as a
+    "different lr_definition".
+    """
     return {"ewald_lambda": float(cfg["lr"]["ewald_lambda"]),
             "reciprocal_cutoff": float(gmax_sq),
             "reciprocal_tolerance": float(cfg["lr"]["reciprocal_tolerance"]),
             "reciprocal_set": {"inversion_symmetric": True,
                                "excludes_G_zero": True,
-                               "cutoff_type": "dielectric_ellipsoid",
-                               "number_of_vectors": int(rep["number_of_vectors"])},
+                               "cutoff_type": "dielectric_ellipsoid"},
             "imaginary_tolerance": float(cfg["lr"]["imaginary_tolerance"]),
             "gauge": "G_zero_equals_zero",
             "sign_convention": "electron_potential_energy",
@@ -187,7 +193,7 @@ def lr_process_stage(cfg, workspace, args):
     if not rep["ok"] or rep["number_of_vectors"] == 0:
         raise SystemExit(f"reciprocal set invalid or empty: {rep}")
     n_int2, g2 = reciprocal_set(rec, eps, gmax_sq * factor ** 2)
-    lr_def = _lr_definition(cfg, gmax_sq, rep)
+    lr_def = _lr_definition(cfg, gmax_sq)
     _record_lr_definition(workspace, lr_def)
 
     store = SnapshotStore(workspace, args.set_name)
@@ -243,6 +249,8 @@ def lr_process_stage(cfg, workspace, args):
         write_blocks(os.path.join(folder, "hamiltonians_sr.h5"), h_sr)
         atomic_write_text(os.path.join(folder, "lr_metadata.json"),
                           json.dumps({"lr_definition": lr_def,
+                                      "reciprocal_set": rep,
+                                      "n_vectors": int(len(n_int)),
                                       "r_imag": r_imag,
                                       "lr_convergence": conv,
                                       "code_version": __version__}, indent=1))

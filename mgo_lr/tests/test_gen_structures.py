@@ -43,7 +43,7 @@ def test_gen_structures_pilot(tmp_path):
     assert dp.gen_structures_stage(CFG, ws, Args()) == 0
     store = SnapshotStore(ws, "pilot")
     sids = store.list()
-    assert len(sids) == 46
+    assert len(sids) == 18
     sc = make_supercell(cell, frac, species, CFG["supercells"]["pilot"])
     for sid in sids:
         folder = store.folder(sid)

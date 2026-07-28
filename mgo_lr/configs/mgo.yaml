@@ -1,5 +1,6 @@
 material:
   name: MgO
+  xc_functional: PBE
   lattice_constant_guess: 4.25        # Angstrom, rocksalt conventional cube
   lattice_constant_relaxed: null      # set after collect-reference (or parsed)
   species: [Mg, O]
@@ -47,6 +48,7 @@ supercells: {pilot: 2, main: 3, large: 4}
 
 displacements:
   seed: 20260720
+  pilot_expanded: false       # false: 18-snapshot approval pilot; true: 50
   amplitudes: [0.005, 0.01, 0.02, 0.04, 0.06]   # Angstrom, main set
   pilot_ladder: [0.0025, 0.005, 0.01, 0.02]     # Angstrom, pilot sign pairs
   min_distance: 1.8                             # Angstrom, hard reject below

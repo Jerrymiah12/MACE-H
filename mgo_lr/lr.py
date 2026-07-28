@@ -126,7 +126,31 @@ def blocks_diff_norm(a, b):
     return float(np.sqrt(tot))
 
 
-def _lr_definition(cfg, gmax_sq):
+_REFERENCE_DEFINITION_FILES = (
+    "reference_cell.npy",
+    "reference_positions.npy",
+    "atomic_numbers.npy",
+    "species_order.json",
+    "born_effective_charges.npy",
+    "dielectric_infinity.npy",
+)
+
+
+def reference_fingerprints(workspace):
+    """Content hashes for every artifact that changes the physical LR labels."""
+    from .config import sha256_file
+
+    ref_dir = os.path.join(workspace, "reference")
+    missing = [name for name in _REFERENCE_DEFINITION_FILES
+               if not os.path.isfile(os.path.join(ref_dir, name))]
+    if missing:
+        raise FileNotFoundError(
+            f"LR reference artifacts missing from {ref_dir}: {missing}")
+    return {name: sha256_file(os.path.join(ref_dir, name))
+            for name in _REFERENCE_DEFINITION_FILES}
+
+
+def _lr_definition(cfg, gmax_sq, reference_hashes):
     """Cell-invariant physical LR definition — the workspace compatibility key.
 
     The reciprocal-vector *count* depends on the supercell size and therefore
@@ -143,7 +167,34 @@ def _lr_definition(cfg, gmax_sq):
             "imaginary_tolerance": float(cfg["lr"]["imaginary_tolerance"]),
             "gauge": "G_zero_equals_zero",
             "sign_convention": "electron_potential_energy",
-            "phase_convention": "reference_positions"}
+            "phase_convention": "reference_positions",
+            "reference_artifacts_sha256": dict(sorted(reference_hashes.items()))}
+
+
+def expected_lr_definition(cfg, workspace):
+    """The complete, cell-invariant LR identity expected in this workspace."""
+    gmax_sq = gmax_squared(cfg["lr"]["ewald_lambda"],
+                           cfg["lr"]["reciprocal_tolerance"])
+    return _lr_definition(cfg, gmax_sq, reference_fingerprints(workspace))
+
+
+def require_current_lr_definition(cfg, workspace):
+    """Fail before publication if labels no longer match their references."""
+    import yaml
+
+    path = os.path.join(workspace, "metadata.yaml")
+    if not os.path.isfile(path):
+        raise SystemExit(
+            "metadata.yaml is missing; run lr-process and validate first")
+    with open(path) as handle:
+        stored = (yaml.safe_load(handle) or {}).get("lr_definition")
+    expected = expected_lr_definition(cfg, workspace)
+    if stored != expected:
+        raise SystemExit(
+            "workspace lr_definition does not match the current LR config and "
+            "reference artifacts; rerun in a clean workspace or restore the "
+            "original references")
+    return stored
 
 
 def _record_lr_definition(workspace, lr_def):
@@ -160,8 +211,54 @@ def _record_lr_definition(workspace, lr_def):
             "metadata.yaml already records a different lr_definition — "
             "refusing to mix LR definitions in one workspace (change the "
             "workspace or restore the original Λ/cutoff config)")
+    units = {"energy": "eV", "length": "angstrom", "charge": "e"}
+    if data.get("units") not in (None, units):
+        raise SystemExit(
+            "metadata.yaml records incompatible units; expected "
+            "energy=eV, length=angstrom, charge=e")
     data["lr_definition"] = lr_def
+    data["units"] = units
     atomic_write_text(path, yaml.safe_dump(data, sort_keys=False))
+
+
+def _invalidate_lr_outputs(folder, workspace):
+    """Remove derived labels/exports after a failed forced LR calculation."""
+    marker = os.path.join(folder, "export_metadata.json")
+    exported_lr_target = False
+    if os.path.isfile(marker):
+        try:
+            with open(marker) as f:
+                exported_lr_target = json.load(f).get("target") in ("lr", "sr")
+        except (json.JSONDecodeError, OSError):
+            exported_lr_target = True
+    target_path = os.path.join(folder, "hamiltonians.h5")
+    if os.path.islink(target_path):
+        exported_lr_target = (
+            os.path.basename(os.readlink(target_path))
+            in ("hamiltonians_lr.h5", "hamiltonians_sr.h5"))
+
+    for name in ("hamiltonians_lr.h5", "hamiltonians_sr.h5",
+                 "lr_metadata.json", "quality_checks.json"):
+        path = os.path.join(folder, name)
+        if os.path.lexists(path):
+            os.remove(path)
+
+    if exported_lr_target:
+        for name in ("hamiltonians.h5", "export_metadata.json"):
+            path = os.path.join(folder, name)
+            if os.path.lexists(path):
+                os.remove(path)
+
+        import yaml
+        from .config import atomic_write_text
+        meta_path = os.path.join(workspace, "metadata.yaml")
+        if os.path.isfile(meta_path):
+            with open(meta_path) as f:
+                data = yaml.safe_load(f) or {}
+            if data.get("training_target") in ("lr", "sr"):
+                data.pop("training_target")
+                atomic_write_text(meta_path,
+                                  yaml.safe_dump(data, sort_keys=False))
 
 
 def lr_process_stage(cfg, workspace, args):
@@ -193,7 +290,7 @@ def lr_process_stage(cfg, workspace, args):
     if not rep["ok"] or rep["number_of_vectors"] == 0:
         raise SystemExit(f"reciprocal set invalid or empty: {rep}")
     n_int2, g2 = reciprocal_set(rec, eps, gmax_sq * factor ** 2)
-    lr_def = _lr_definition(cfg, gmax_sq)
+    lr_def = _lr_definition(cfg, gmax_sq, reference_fingerprints(workspace))
     _record_lr_definition(workspace, lr_def)
 
     store = SnapshotStore(workspace, args.set_name)
@@ -207,6 +304,15 @@ def lr_process_stage(cfg, workspace, args):
             skipped += 1
             continue
         folder = store.folder(sid)
+        if args.force:
+            # Transaction boundary: both symlink and copy exports must be
+            # invalidated before rewriting their source labels.  If any later
+            # read/calculation raises unexpectedly, the state remains safely
+            # below lr_done and no stale derived label can be published.
+            _invalidate_lr_outputs(folder, workspace)
+            store.write_status(sid, "converted", lr_failed=None,
+                               r_imag=None, lr_convergence=None,
+                               lr_rerun_pending=True)
         pos = np.loadtxt(os.path.join(folder, "site_positions.dat")).T
         u = minimum_image_displacements(sc.cell, pos, sc.cart)
         u_stored = np.load(os.path.join(folder, "displacements.npy"))
@@ -218,14 +324,17 @@ def lr_process_stage(cfg, workspace, args):
         coeffs = lr_coefficients(g_cart, dipoles, sc.cart, eps, lam, volume)
         v_c = evaluate_potential(g_cart, coeffs, pos)  # snapshot AO centers
         r_imag = imaginary_residual(v_c, delta)
-        if r_imag >= tau_imag:
+        if not np.isfinite(r_imag) or r_imag >= tau_imag:
+            _invalidate_lr_outputs(folder, workspace)
             atomic_write_text(
                 os.path.join(folder, "lr_failure.json"),
                 json.dumps({"r_imag": r_imag, "reciprocal_set": rep,
                             "n_vectors": int(len(n_int)),
                             "lr_definition": lr_def}, indent=1))
-            store.write_status(sid, st["state"],
-                               lr_failed=f"imaginary_residual {r_imag:.3e}")
+            store.write_status(sid, "converted",
+                               lr_failed=f"imaginary_residual {r_imag:.3e}",
+                               r_imag=None, lr_convergence=None,
+                               lr_rerun_pending=False)
             exit_code = 1
             continue
         v_atom = np.real(v_c)
@@ -254,7 +363,12 @@ def lr_process_stage(cfg, workspace, args):
                                       "r_imag": r_imag,
                                       "lr_convergence": conv,
                                       "code_version": __version__}, indent=1))
-        store.write_status(sid, "lr_done", r_imag=r_imag, lr_convergence=conv)
+        failure_path = os.path.join(folder, "lr_failure.json")
+        if os.path.exists(failure_path):
+            os.remove(failure_path)
+        store.write_status(sid, "lr_done", r_imag=r_imag,
+                           lr_convergence=conv, lr_failed=None,
+                           lr_rerun_pending=False)
         processed += 1
     print(f"{args.set_name}: lr-processed {processed}, skipped {skipped}")
     return exit_code

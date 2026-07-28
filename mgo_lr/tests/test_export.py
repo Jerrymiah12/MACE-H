@@ -64,6 +64,34 @@ def test_export_sr_refuses_partial_dataset(tmp_path):
     assert meta["training_target"] == "full"                 # target unchanged
 
 
+def test_export_preflight_leaves_no_partial_targets(tmp_path):
+    ws, cfg, store = ladder_workspace(tmp_path)
+    missing_sid = store.list()[1]
+    os.remove(os.path.join(store.folder(missing_sid), "hamiltonians_sr.h5"))
+    with pytest.raises(SystemExit, match="incomplete dataset"):
+        export.export_target_stage(cfg, ws, _args("sr"))
+    for sid in store.list():
+        assert not os.path.lexists(
+            os.path.join(store.folder(sid), "hamiltonians.h5"))
+        assert not os.path.exists(
+            os.path.join(store.folder(sid), "export_metadata.json"))
+    metadata = yaml.safe_load(open(os.path.join(ws, "metadata.yaml")))
+    assert "training_target" not in metadata
+
+
+def test_export_rejects_stale_reference_identity(tmp_path):
+    ws, cfg, store = ladder_workspace(tmp_path)
+    path = os.path.join(ws, "reference", "dielectric_infinity.npy")
+    dielectric = np.load(path)
+    dielectric[0, 0] += 0.1
+    np.save(path, dielectric)
+    with pytest.raises(SystemExit, match="reference artifacts"):
+        export.export_target_stage(cfg, ws, _args("sr"))
+    assert all(not os.path.lexists(
+        os.path.join(store.folder(sid), "hamiltonians.h5"))
+        for sid in store.list())
+
+
 def test_export_refuses_foreign_file(tmp_path):
     ws, cfg, store = ladder_workspace(tmp_path)
     sid = store.list()[0]

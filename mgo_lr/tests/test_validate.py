@@ -125,12 +125,44 @@ def test_validate_rejects_nan(tmp_path):
     assert "nan" in _rejected_reason(ws, sid)
 
 
+def test_validate_rejects_nan_position(tmp_path):
+    ws, cfg, store = ladder_workspace(tmp_path)
+    sid = store.list()[0]
+    path = os.path.join(store.folder(sid), "site_positions.dat")
+    positions = np.loadtxt(path)
+    positions[0, 0] = np.nan
+    np.savetxt(path, positions)
+    assert validate.validate_stage(cfg, ws, Args()) == 1
+    assert "NaN" in _rejected_reason(ws, sid)
+
+
 def test_validate_rejects_missing_file(tmp_path):
     ws, cfg, store = ladder_workspace(tmp_path)
     sid = store.list()[0]
     os.remove(os.path.join(store.folder(sid), "lat.dat"))
     assert validate.validate_stage(cfg, ws, Args()) == 1
     assert "missing_file" in _rejected_reason(ws, sid)
+
+
+def test_validate_rejects_missing_workspace_metadata(tmp_path):
+    ws, cfg, store = ladder_workspace(tmp_path)
+    os.remove(os.path.join(ws, "metadata.yaml"))
+    assert validate.validate_stage(cfg, ws, Args()) == 1
+    for sid in ("snapshot_000001", "snapshot_000002",
+                "snapshot_000003", "snapshot_000004"):
+        assert "lr_definition" in _rejected_reason(ws, sid)
+
+
+def test_validate_rejects_missing_raw_hash_provenance(tmp_path):
+    ws, cfg, store = ladder_workspace(tmp_path)
+    sid = store.list()[0]
+    status_path = os.path.join(store.folder(sid), "status.json")
+    status = json.load(open(status_path))
+    status["raw_sha256"].pop("running_scf.log")
+    with open(status_path, "w") as handle:
+        json.dump(status, handle)
+    assert validate.validate_stage(cfg, ws, Args()) == 1
+    assert "raw_dft_sha256" in _rejected_reason(ws, sid)
 
 
 def test_validate_rejects_modified_raw(tmp_path):

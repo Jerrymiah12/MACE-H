@@ -11,7 +11,8 @@ Design spec: `docs/superpowers/specs/2026-07-20-mgo-lr-dataset-pipeline-design.m
 Source instructions and reviews: `instructions/`.
 
 `mgo_lr` never imports `maceh`. Compatibility with the maceh loader is a
-file-format contract (`maceh/graph.py`) pinned by tests.
+file-format contract (`maceh/graph.py` and its recursive directory discovery)
+pinned by tests.
 
 ## Requirements
 
@@ -39,14 +40,18 @@ Stages, in the order of one full round-trip:
 | `lr-process --set …` | screened-dipole `V^LR` → `hamiltonians_lr.h5`, `hamiltonians_sr.h5` | collect-dft, collect-dfpt |
 | `validate --set …` | Tier-1 hard checks (reject) + Tier-2 response checks | lr-process |
 | `locality-report --set …` | Tier-3 diagnostics: tail fractions, odd response, family comparisons | validate |
-| `organize` | grouped splits, candidate dirs, `metadata.yaml` provenance | validate |
 | `export-target --target …` | materialize `hamiltonians.h5` for the maceh loader | lr-process |
+| `organize` | grouped splits, candidate dirs, `loader_splits/` views, `metadata.yaml` provenance | validate, export-target |
 | `status` | per-set state counts | any time |
 
 Snapshots advance through `prepared → dft_done → converted → lr_done →
 validated` (or `rejected`, moved to `rejected/` with a machine-readable
 reason). Stages are idempotent: already-processed snapshots are skipped
 without `--force`, and raw DFT outputs are never modified.
+
+The default `pilot_expanded: false` generates the 18-snapshot initial
+approval pilot. Set it to `true` in a separate workspace to generate the
+50-snapshot follow-up, including matched finite-|q| trend probes.
 
 ## Workspace layout
 
@@ -60,9 +65,18 @@ without `--force`, and raw DFT outputs are never modified.
 ├── test_large_cell/         # 4x4x4 extrapolation set, never mixed into main
 ├── validation_candidates/   # symlinks + candidates.json
 ├── test_candidates/
+├── loader_splits/            # real train/validation/test dirs with file links
+│   ├── train/
+│   ├── validation/
+│   └── test/
 ├── rejected/
 └── generation_logs/         # resolved configs, validation + locality reports
 ```
+
+Use the roots recorded under `loader_split_roots` in `metadata.yaml` when
+building MACE-H graphs. They contain real snapshot directories because the
+loader's `os.walk` traversal does not follow directory symlinks. Run
+`export-target` before loading so each view's `hamiltonians.h5` link resolves.
 
 ## Conventions (fixed for the dataset; recorded in metadata)
 
@@ -78,7 +92,10 @@ without `--force`, and raw DFT outputs are never modified.
   sign (`LR_SIGN = −1`, pinned by test), inversion-symmetric G set with a
   dielectric-ellipsoid cutoff. **Ewald Λ is part of the dataset definition**
   — it is never "converged away", and `lr-process` refuses to mix two LR
-  definitions in one workspace.
+  definitions in one workspace. The identity also includes SHA-256 hashes of
+  the reference cell, positions, species/atomic-number mapping, Born charges,
+  and dielectric tensor. Validation, organization, and LR/SR export reject a
+  stale identity.
 - ABACUS `INPUT` always has `gamma_only 0` and `symmetry 0` (the gamma-only
   algorithm does not support `out_mat_hs2`).
 - One global seed (`displacements.seed`); all randomness flows through
@@ -87,7 +104,8 @@ without `--force`, and raw DFT outputs are never modified.
 ## Validation tiers
 
 1. **Tier 1 (hard, per snapshot):** file inventory, NaN/Inf, dimensions,
-   key format, rlat/lat convention, overlap diagonal, raw-output sha256,
+   integer key format, atom/orbital mapping, reference-position agreement,
+   units, rlat/lat convention, overlap diagonal, complete raw-output SHA-256,
    hermiticity, `H^SR + H^LR = H^full` reconstruction, reciprocal-set
    symmetry, imaginary residual, G-sum convergence, equilibrium/translation
    exact zeros. Failure ⇒ snapshot rejected, nonzero exit.
@@ -100,6 +118,20 @@ without `--force`, and raw DFT outputs are never modified.
    comparison families, locality tail fractions — `F_SR(r) < F_full(r)`
    over long distances is the dataset-level approval requirement.
 
+## Publication safeguards
+
+- Main-set q shells are assigned to train/validation/test before patterns are
+  generated. Pattern groups, exact ±q families, and complete |q| shells cannot
+  cross subsets. Existing main structures without `split_hint` metadata must
+  be regenerated.
+- `organize` requires every configured ABACUS/QE pseudopotential and ABACUS
+  orbital file to exist locally, hashes them, and refuses null provenance.
+- LR/SR export covers every converted snapshot and is all-or-nothing. Missing
+  labels, foreign targets, stale reference identities, or mixed prior exports
+  fail during preflight before any target file or workspace metadata changes.
+- A failed forced LR rerun removes old LR/SR labels, validation output, and any
+  LR/SR training export before returning the snapshot to `converted`.
+
 ## Tests
 
 ```
@@ -107,3 +139,7 @@ without `--force`, and raw DFT outputs are never modified.
 ```
 
 Synthetic fixtures only — no DFT binaries or network required.
+
+Before production use, archive at least one small real ABACUS/QE pilot output
+as a parser compatibility fixture and run the 18-snapshot pilot end to end on
+the target cluster software versions.

@@ -59,6 +59,27 @@ def test_locality_all_zero_long_range_is_not_a_pass():
     assert locality.long_range_localizes(f_full, list(f_full), 1e-6, 0.05) is False
 
 
+def test_controlled_q_comparisons_average_each_shell():
+    metas = {
+        "small-plus": {"wavevector_family_id": "qfam", "q_magnitude": 0.2,
+                       "polarization_class": "longitudinal"},
+        "small-minus": {"wavevector_family_id": "qfam", "q_magnitude": 0.2,
+                        "polarization_class": "longitudinal"},
+        "medium": {"wavevector_family_id": "qfam", "q_magnitude": 0.4,
+                   "polarization_class": "longitudinal"},
+        "large": {"wavevector_family_id": "qfam", "q_magnitude": 0.6,
+                  "polarization_class": "longitudinal"},
+    }
+    norms = {"small-plus": 5.0, "small-minus": 3.0,
+             "medium": 2.0, "large": 1.0}
+    comparisons = locality.controlled_q_comparisons(metas, norms)
+    assert len(comparisons) == 1
+    comparison = comparisons[0]
+    assert [shell["mean_lr_norm"] for shell in comparison["shells"]] == \
+        [4.0, 2.0, 1.0]
+    assert comparison["small_q_has_stronger_lr"] is True
+
+
 def test_locality_report_stage(tmp_path):
     ws, cfg, store = ladder_workspace(tmp_path)
     assert validate.validate_stage(cfg, ws, Args()) == 0

@@ -5,7 +5,7 @@ import yaml
 
 REQUIRED = [
     "material.name", "material.lattice_constant_guess", "material.species",
-    "material.masses",
+    "material.masses", "material.xc_functional",
     "abacus.pseudo_dir", "abacus.orbital_dir", "abacus.pseudopotentials",
     "abacus.orbitals", "abacus.orbital_types", "abacus.ecutwfc",
     "abacus.scf_thr", "abacus.scf_nmax", "abacus.smearing_method",
@@ -20,13 +20,15 @@ REQUIRED = [
     "displacements.seed", "displacements.min_distance",
     "displacements.amplitudes", "displacements.pilot_ladder",
     "displacements.main_composition", "displacements.large_count",
+    "displacements.pilot_expanded",
     "lr.ewald_lambda", "lr.reciprocal_tolerance", "lr.imaginary_tolerance",
     "lr.convergence_factor",
     "validation.delta", "validation.tau_eq", "validation.tau_u",
     "validation.tau_translation", "validation.tau_reconstruct",
     "validation.tau_hermiticity", "validation.tau_G",
     "validation.tau_overlap_diag", "validation.tier2_enforce",
-    "locality.bin_width",
+    "locality.bin_width", "locality.tail_floor",
+    "locality.min_tail_improvement",
     "splits.validation_fraction", "splits.test_fraction",
     "slurm.header", "slurm.abacus_command",
 ]

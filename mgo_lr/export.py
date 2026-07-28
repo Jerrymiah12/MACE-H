@@ -14,6 +14,7 @@ import yaml
 
 from . import __version__
 from .config import atomic_write_text
+from .lr import require_current_lr_definition
 from .snapshot import SnapshotStore
 
 SOURCES = {"full": "hamiltonians_full.h5",
@@ -90,28 +91,34 @@ def export_target_stage(cfg, workspace, args):
     min_state = "converted" if target == "full" else "lr_done"
     src = SOURCES[target]
 
-    # Export is all-or-nothing: verify the whole scope BEFORE changing any
-    # file.  A snapshot that is simply not ready yet (no export at all) is
-    # excluded silently — it is not part of the dataset.  What makes a dataset
-    # mixed, and is therefore refused, is a skipped snapshot that still carries
-    # an export of a DIFFERENT target.  Foreign target files are likewise
-    # caught up front so nothing is written when we will refuse.
-    eligible, stale, foreign = [], [], []
+    # Export is all-or-nothing: verify every converted snapshot BEFORE changing
+    # any file.  Foreign targets and snapshots that have not reached the
+    # requested label state are caught up front, so failure changes nothing.
+    eligible, stale, foreign, incomplete = [], [], [], []
     for set_name in ("pilot", "main", "large"):
         store = SnapshotStore(workspace, set_name)
         for sid in store.list():
             if store.read_status(sid)["state"] == "rejected":
                 continue
             folder = store.folder(sid)
+            # A converted folder already satisfies the MACE-H structure-file
+            # discovery contract, so it is part of the export scope.  Silently
+            # skipping it would leave an unloadable/mixed dataset.
+            if not store.state_at_least(sid, "converted"):
+                continue
             ready = (store.state_at_least(sid, min_state)
                      and os.path.exists(os.path.join(folder, src)))
             if ready and _safe_to_replace(folder):
                 eligible.append(folder)
             elif ready:
                 foreign.append(os.path.join(folder, TARGET_NAME))
-            elif _current_export_target(folder) not in (None, target):
-                stale.append(f"{set_name}/{sid} "
-                             f"(currently {_current_export_target(folder)})")
+            else:
+                current = _current_export_target(folder)
+                incomplete.append(
+                    f"{set_name}/{sid} (state "
+                    f"{store.read_status(sid)['state']}, missing {src})")
+                if current not in (None, target):
+                    stale.append(f"{set_name}/{sid} (currently {current})")
 
     if foreign:
         raise SystemExit(
@@ -123,8 +130,16 @@ def export_target_stage(cfg, workspace, args):
             f"{len(stale)} snapshot(s) still carry a different export target "
             "and cannot advance; refusing to publish a mixed dataset (no files "
             "changed):\n  " + "\n  ".join(stale))
+    if incomplete:
+        raise SystemExit(
+            f"export-target {target} is all-or-nothing but "
+            f"{len(incomplete)} converted snapshot(s) are not ready; refusing "
+            "to publish an incomplete dataset (no files changed):\n  "
+            + "\n  ".join(incomplete))
     if not eligible:
         raise SystemExit(f"export-target {target}: no eligible snapshots")
+    if target in ("lr", "sr"):
+        require_current_lr_definition(cfg, workspace)
 
     for folder in eligible:
         export_snapshot(folder, target)

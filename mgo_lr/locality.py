@@ -9,6 +9,7 @@ groups.
 import json
 import os
 
+import h5py
 import numpy as np
 
 from .config import atomic_write_text
@@ -64,6 +65,62 @@ def binned_norms(blocks, cart, cell, bin_width):
             for b, ns in sorted(bins.items())]
 
 
+def accumulate_binned_norms(accumulator, blocks, cart, cell, bin_width):
+    for key, value in blocks.items():
+        bucket = int(block_distance(key, cart, cell) // bin_width)
+        accumulator.setdefault(bucket, []).append(float(np.linalg.norm(value)))
+
+
+def summarize_binned_norms(accumulator, bin_width):
+    return [{"r_lo": b * bin_width, "r_hi": (b + 1) * bin_width,
+             "count": len(values), "mean": float(np.mean(values)),
+             "median": float(np.median(values)), "max": float(np.max(values))}
+            for b, values in sorted(accumulator.items())]
+
+
+def h5_max_block_distance(path, cart, cell):
+    with h5py.File(path, "r") as handle:
+        distances = [block_distance(key, cart, cell) for key in handle.keys()]
+    return max(distances) if distances else 0.0
+
+
+def controlled_q_comparisons(metas, lr_norms):
+    """Summarize matched-pattern LR norms over distinct |q| shells."""
+    families = {}
+    for sid, meta in metas.items():
+        family_id = meta.get("wavevector_family_id")
+        if not family_id:
+            continue
+        families.setdefault(family_id, []).append({
+            "sid": sid, "q_magnitude": float(meta.get("q_magnitude") or 0.0),
+            "lr_norm": float(lr_norms[sid]),
+            "polarization_class": meta.get("polarization_class")})
+
+    comparisons = []
+    for family_id, members in sorted(families.items()):
+        by_magnitude = {}
+        for entry in members:
+            magnitude = round(entry["q_magnitude"], 10)
+            by_magnitude.setdefault(magnitude, []).append(entry)
+        if len(by_magnitude) < 2:
+            continue
+        shell_means = []
+        for magnitude, shell_members in sorted(by_magnitude.items()):
+            shell_means.append({
+                "q_magnitude": magnitude,
+                "mean_lr_norm": float(np.mean(
+                    [entry["lr_norm"] for entry in shell_members])),
+                "sids": [entry["sid"] for entry in shell_members],
+            })
+        small, large = shell_means[0], shell_means[-1]
+        comparisons.append({
+            "family": family_id, "shells": shell_means,
+            "small_q": small, "large_q": large,
+            "small_q_has_stronger_lr":
+                small["mean_lr_norm"] >= large["mean_lr_norm"]})
+    return comparisons
+
+
 def long_range_localizes(f_full, f_sr, floor, min_improvement):
     """Dataset-level approval criterion for `H^SR` localization.
 
@@ -95,41 +152,52 @@ def locality_report_stage(cfg, workspace, args):
         return read_blocks(os.path.join(store.folder(sid),
                                         f"hamiltonians_{kind}.h5"))
 
-    # Radius grid, cell, and per-snapshot binned stats come from the first
-    # validated snapshot; load its blocks once and release them.
+    # Build one radius grid covering every snapshot.  Matrix sparsity can make
+    # later snapshots contain longer-R keys than the first one.
     folder0 = store.folder(sids[0])
     cell = np.loadtxt(os.path.join(folder0, "lat.dat")).T   # columns -> rows
-    cart0 = np.loadtxt(os.path.join(folder0, "site_positions.dat")).T
-    h_full0 = blocks(sids[0], "full")
-    rmax = max(block_distance(k, cart0, cell) for k in h_full0)
+    rmax = 0.0
+    for sid in sids:
+        folder = store.folder(sid)
+        cart = np.loadtxt(os.path.join(folder, "site_positions.dat")).T
+        for kind in ("full", "lr", "sr"):
+            rmax = max(rmax, h5_max_block_distance(
+                os.path.join(folder, f"hamiltonians_{kind}.h5"),
+                cart, cell))
     radii = [bin_width * i for i in range(1, int(rmax // bin_width) + 2)]
-    binned = {"full": binned_norms(h_full0, cart0, cell, bin_width),
-              "lr": binned_norms(blocks(sids[0], "lr"), cart0, cell, bin_width),
-              "sr": binned_norms(blocks(sids[0], "sr"), cart0, cell, bin_width)}
-    del h_full0
 
     # Stream one snapshot at a time: accumulate tail fractions and the scalar
     # H_LR norms, holding only the current snapshot's blocks in memory (the
     # planned 400-structure set would need many GB if held all at once).
     metas, lr_norms = {}, {}
     tails = {"full": [], "lr": [], "sr": []}
+    binned_acc = {"full": {}, "lr": {}, "sr": {}}
     for sid in sids:
         folder = store.folder(sid)
         with open(os.path.join(folder, "displacement_metadata.json")) as f:
             metas[sid] = json.load(f)
         cart = np.loadtxt(os.path.join(folder, "site_positions.dat")).T
+        hf = blocks(sid, "full")
+        tails["full"].append(tail_fractions(hf, cart, cell, radii))
+        accumulate_binned_norms(binned_acc["full"], hf, cart, cell, bin_width)
+        del hf
         hl = blocks(sid, "lr")
-        tails["full"].append(tail_fractions(blocks(sid, "full"), cart, cell,
-                                            radii))
         tails["lr"].append(tail_fractions(hl, cart, cell, radii))
-        tails["sr"].append(tail_fractions(blocks(sid, "sr"), cart, cell, radii))
+        accumulate_binned_norms(binned_acc["lr"], hl, cart, cell, bin_width)
         lr_norms[sid] = blocks_norm(hl)
+        del hl
+        hs = blocks(sid, "sr")
+        tails["sr"].append(tail_fractions(hs, cart, cell, radii))
+        accumulate_binned_norms(binned_acc["sr"], hs, cart, cell, bin_width)
+        del hs
     f_mean = {k: np.mean(np.array(v), axis=0).tolist()
               for k, v in tails.items()}
     f_sr_ok = long_range_localizes(
         f_mean["full"], f_mean["sr"],
         float(cfg["locality"].get("tail_floor", 1e-6)),
         float(cfg["locality"].get("min_tail_improvement", 0.05)))
+    binned = {kind: summarize_binned_norms(values, bin_width)
+              for kind, values in binned_acc.items()}
 
     # Odd-response pairs: load only the ± pair members' blocks, momentarily.
     odd = []
@@ -162,12 +230,18 @@ def locality_report_stage(cfg, workspace, args):
         fam["mean_lr_norm_by_class"] = {c: float(np.mean(v))
                                         for c, v in by_class.items()}
 
+    # Controlled |q| comparisons: wavevector_family_id matches amplitude,
+    # phase, normalization, species ratio, polarization, and supercell while
+    # deliberately excluding q magnitude.
+    q_comparisons = controlled_q_comparisons(metas, lr_norms)
+
     report = {"set": args.set_name, "n_snapshots": len(sids),
               "tail": {"radii": radii, "F_full": f_mean["full"],
                        "F_lr": f_mean["lr"], "F_sr": f_mean["sr"],
                        "f_sr_below_f_full": f_sr_ok},
               "binned": binned,
-              "odd_response": odd, "families": families}
+              "odd_response": odd, "families": families,
+              "wavevector_comparisons": q_comparisons}
     out_dir = os.path.join(workspace, "generation_logs", "locality")
     os.makedirs(out_dir, exist_ok=True)
     atomic_write_text(os.path.join(out_dir,

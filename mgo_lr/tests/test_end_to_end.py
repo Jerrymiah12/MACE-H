@@ -39,7 +39,7 @@ def test_full_pipeline(tmp_path):
     assert dp.gen_structures_stage(cfg, ws, a) == 0
     store = SnapshotStore(ws, "pilot")
     sids = store.list()
-    assert len(sids) == 46
+    assert len(sids) == 18
 
     # fabricate DFT for the first 10 snapshots (equilibrium + ladder pairs);
     # one common seed so every snapshot shares the same synthetic H/S
@@ -64,6 +64,20 @@ def test_full_pipeline(tmp_path):
     assert locality.locality_report_stage(cfg, ws, a) == 0
     assert os.path.exists(os.path.join(ws, "generation_logs", "locality",
                                        "locality_pilot.json"))
+    # Complete local provenance is mandatory before publishing organization
+    # metadata, even for this synthetic empty-main fixture.
+    pseudo = tmp_path / "pseudo"
+    orbital = tmp_path / "orbital"
+    pseudo.mkdir()
+    orbital.mkdir()
+    cfg["abacus"]["pseudo_dir"] = str(pseudo)
+    cfg["qe"]["pseudo_dir"] = str(pseudo)
+    cfg["abacus"]["orbital_dir"] = str(orbital)
+    for name in set(cfg["abacus"]["pseudopotentials"].values()) \
+            | set(cfg["qe"]["pseudopotentials"].values()):
+        (pseudo / name).write_text(name)
+    for name in cfg["abacus"]["orbitals"].values():
+        (orbital / name).write_text(name)
     assert organize.organize_stage(cfg, ws, a) == 0        # empty main OK
     splits = json.load(open(os.path.join(ws, "splits.json")))
     assert splits["pilot"] == sorted(done)

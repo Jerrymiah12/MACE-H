@@ -73,20 +73,41 @@ def test_apply_rigid_translation_and_random():
 
 def test_build_pilot_contents():
     plans = dp.build_pilot(CFG, PRIM_CELL)
-    # 1 eq + 5 sign-paired bases x 4 amplitudes x 2 signs + 2 mixed
-    # + 2 random + 1 rigid translation
-    assert len(plans) == 46
+    # Initial approval pilot: 1 equilibrium + optical ladder (8) + Mg sign
+    # pair (2) + matched L/T (2) + 2 mixed + 2 random + 1 translation.
+    assert len(plans) == 18
     assert plans[0]["metadata"]["pattern_class"] == "equilibrium"
     classes = [p["metadata"]["pattern_class"] for p in plans]
-    for name in ("mg_only_x", "o_only_x", "optical_x", "longitudinal_q",
-                 "transverse_q"):
-        assert classes.count(name) == 8
+    assert classes.count("optical_x") == 8
+    assert classes.count("mg_only_x") == 2
+    assert classes.count("longitudinal_q") == 1
+    assert classes.count("transverse_q") == 1
     assert classes.count("mixed") == 2
     assert classes.count("random_local") == 2
     assert classes.count("rigid_translation") == 1
     # deterministic
     again = dp.build_pilot(CFG, PRIM_CELL)
     assert json.dumps(plans, sort_keys=True) == json.dumps(again, sort_keys=True)
+
+
+def test_build_expanded_pilot_contents():
+    import copy
+    cfg = copy.deepcopy(CFG)
+    cfg["displacements"]["pilot_expanded"] = True
+    plans = dp.build_pilot(cfg, PRIM_CELL)
+    assert len(plans) == 50
+    classes = [p["metadata"]["pattern_class"] for p in plans]
+    for name in ("mg_only_x", "o_only_x", "optical_x", "longitudinal_q",
+                 "transverse_q"):
+        assert classes.count(name) == 8
+    assert classes.count("wavevector_trend") == 4
+    q_families = {}
+    for plan in plans:
+        meta = plan["metadata"]
+        if meta["wavevector_family_id"]:
+            q_families.setdefault(meta["wavevector_family_id"], set()).add(
+                round(meta["q_magnitude"], 10))
+    assert sum(len(magnitudes) >= 2 for magnitudes in q_families.values()) == 2
 
 
 def test_pilot_partner_wiring():
@@ -118,7 +139,8 @@ def test_pilot_longitudinal_transverse_share_family():
 def test_metadata_schema():
     plans = dp.build_pilot(CFG, PRIM_CELL)
     keys = {"pattern_group_id", "pattern_class", "comparison_family_id",
-            "mode_normalization", "q_vectors", "q_magnitude", "polarizations",
+            "mode_normalization", "q_vectors", "q_magnitude", "q_magnitudes",
+            "polarizations",
             "polarization_class", "phases", "phase", "amplitudes", "amplitude",
             "sign_partner_id", "amplitude_partner_ids", "rigid_translation",
             "seed"}
@@ -144,6 +166,16 @@ def test_build_main_composition_and_seeding():
     pairs = [m for m in by_sid.values()
              if m["pattern_class"] == "sign_paired_calibration"]
     assert all(by_sid[m["sign_partner_id"]]["sign_partner_id"] for m in pairs)
+    assert {p["metadata"]["split_hint"] for p in plans} == \
+        {"train", "validation", "test"}
+    subset_qs = {}
+    for subset in ("train", "validation", "test"):
+        subset_qs[subset] = {
+            tuple(q) for p in plans if p["metadata"]["split_hint"] == subset
+            for q in p["metadata"]["q_vectors"]}
+    assert subset_qs["train"].isdisjoint(subset_qs["validation"])
+    assert subset_qs["train"].isdisjoint(subset_qs["test"])
+    assert subset_qs["validation"].isdisjoint(subset_qs["test"])
 
 
 def test_fold_q_centers_indices():

@@ -98,17 +98,21 @@ def _metadata(n, prim_cell, pattern, group_id, seed_index):
     modes = pattern.get("modes", [])
     rec_super = reciprocal(np.asarray(prim_cell, float) * n)
     if modes:
-        q_mag = float(np.linalg.norm(
-            np.asarray(modes[0]["q_int"], float) @ rec_super))
+        q_magnitudes = [float(np.linalg.norm(
+            np.asarray(mode["q_int"], float) @ rec_super))
+            for mode in modes]
+        q_mag = q_magnitudes[0]
         amp = modes[0]["amplitude"]
         phase = modes[0]["phase"]
         pol_class = modes[0]["polarization_class"]
         weights = modes[0]["species_weights"]
     elif pattern.get("random") is not None:
         q_mag, amp, phase, pol_class = 0.0, pattern["random"]["amplitude"], 0.0, "none"
+        q_magnitudes = []
         weights = {"Mg": 1.0, "O": 1.0}
     else:
         q_mag, phase, pol_class = 0.0, 0.0, "none"
+        q_magnitudes = []
         weights = {"Mg": 0.0, "O": 0.0}
         amp = float(np.linalg.norm(pattern["translation"])) \
             if pattern.get("translation") is not None else 0.0
@@ -118,13 +122,22 @@ def _metadata(n, prim_cell, pattern, group_id, seed_index):
     # longitudinal/transverse partners share a family.
     family = _hash_id("fam", n, round(q_mag, 8), round(abs(amp), 8),
                       round(phase, 8), MODE_NORMALIZATION, ratio_sig)
+    wave_family = None
+    if len(modes) == 1:
+        # Same controlled pattern except for |q|.  Locality diagnostics use
+        # this identity for small-|q| versus large-|q| comparisons.
+        wave_family = _hash_id(
+            "qfam", n, round(abs(amp), 8), round(phase, 8),
+            MODE_NORMALIZATION, ratio_sig, pol_class)
     return {
         "pattern_group_id": group_id,
         "pattern_class": pattern["pattern_class"],
         "comparison_family_id": family,
+        "wavevector_family_id": wave_family,
         "mode_normalization": MODE_NORMALIZATION,
         "q_vectors": [m["q_int"] for m in modes],
         "q_magnitude": q_mag,
+        "q_magnitudes": q_magnitudes,
         "polarizations": [m["polarization"] for m in modes],
         "polarization_class": pol_class,
         "phases": [m["phase"] for m in modes],
@@ -144,7 +157,10 @@ def build_pilot(cfg, prim_cell):
     ladder = [float(a) for a in cfg["displacements"]["pilot_ladder"]]
     rec_super = reciprocal(np.asarray(prim_cell, float) * n)
     x = [1.0, 0.0, 0.0]
-    q1 = [1, 0, 0]
+    # n=1 is supported by tiny synthetic parser fixtures; it has no nonzero
+    # folded q, so retain a reciprocal-lattice representative there.  The
+    # production pilot is n=2 and always uses centered indices.
+    q1 = fold_q([1, 0, 0], n) if n > 1 else [1, 0, 0]
     qhat = _unit(np.asarray(q1, float) @ rec_super)
     bases = [
         ("mg_only_x", [0, 0, 0], x, "none", {"Mg": 1.0, "O": 0.0}),
@@ -168,11 +184,12 @@ def build_pilot(cfg, prim_cell):
     add({"pattern_class": "equilibrium", "modes": []},
         _hash_id("grp", "pilot", n, "equilibrium"))
 
-    for name, q_int, pol, pol_class, weights in bases:
+    def add_signed_series(base, amplitudes):
+        name, q_int, pol, pol_class, weights = base
         gid = _hash_id("grp", "pilot", n, name, q_int, pol_class,
                        sorted(weights.items()))
         members = {}
-        for amp in ladder:
+        for amp in amplitudes:
             for sign in (1.0, -1.0):
                 plan = add({"pattern_class": name, "modes": [
                     _mode(q_int, sign * amp, 0.0, pol, pol_class, weights)]},
@@ -181,9 +198,46 @@ def build_pilot(cfg, prim_cell):
         for (amp, sign), plan in members.items():
             plan["metadata"]["sign_partner_id"] = members[(amp, -sign)]["sid"]
             plan["metadata"]["amplitude_partner_ids"] = [
-                members[(a, sign)]["sid"] for a in ladder if a != amp]
+                members[(a, sign)]["sid"] for a in amplitudes if a != amp]
 
-    q2 = [0, 1, 0]
+    if bool(cfg["displacements"]["pilot_expanded"]):
+        for base in bases:
+            add_signed_series(base, ladder)
+        # Matched finite-q probes for the requested controlled |q| trend.
+        # The signed q1 ladder above supplies the smallest shell.  These add
+        # face- and body-diagonal shells at the same amplitude, phase, species
+        # ratio, normalization, and polarization class, bringing the expanded
+        # pilot to exactly 50 structures.
+        calibration_amp = min(ladder, key=lambda a: abs(a - 0.01))
+        for q_raw in ([1, 1, 0], [1, 1, 1]):
+            q_int = fold_q(q_raw, n)
+            qhat_probe = _unit(np.asarray(q_int, float) @ rec_super)
+            for pol, pol_class in (
+                    (qhat_probe, "longitudinal"),
+                    (_transverse(qhat_probe), "transverse")):
+                add({"pattern_class": "wavevector_trend", "modes": [
+                    _mode(q_int, calibration_amp, 0.0, pol.tolist(),
+                          pol_class, {"Mg": 1.0, "O": -1.0})]},
+                    _hash_id("grp", "pilot", n, "wavevector_trend",
+                             q_int, pol_class))
+    else:
+        # Initial approval pilot: one complete optical amplitude ladder, one
+        # additional directional sign pair, and matched longitudinal/transverse
+        # probes.  This exercises every required behavior in 18 structures;
+        # setting pilot_expanded=true enables the 50-structure follow-up.
+        by_name = {base[0]: base for base in bases}
+        add_signed_series(by_name["optical_x"], ladder)
+        calibration_amp = min(ladder, key=lambda a: abs(a - 0.01))
+        add_signed_series(by_name["mg_only_x"], [calibration_amp])
+        for name in ("longitudinal_q", "transverse_q"):
+            base = by_name[name]
+            bname, q_int, pol, pol_class, weights = base
+            add({"pattern_class": bname, "modes": [
+                _mode(q_int, calibration_amp, 0.0, pol, pol_class, weights)]},
+                _hash_id("grp", "pilot", n, bname, q_int, pol_class,
+                         sorted(weights.items())))
+
+    q2 = fold_q([0, 1, 0], n) if n > 1 else [0, 1, 0]
     q2hat = _unit(np.asarray(q2, float) @ rec_super)
     for i, (a1, a2, ph2) in enumerate([(0.01, 0.005, 0.0),
                                        (0.01, 0.01, np.pi / 3)]):
@@ -217,15 +271,22 @@ def fold_q(q, n):
     return [int(((int(c) + n // 2) % n) - n // 2) for c in q]
 
 
-def _random_q(rng, n):
+def _random_q(rng, n, candidates=None):
+    if candidates:
+        return list(candidates[int(rng.integers(0, len(candidates)))])
     while True:
         q = [int(rng.integers(0, n)) for _ in range(3)]
         if any(q):
             return fold_q(q, n)
 
 
-def _low_q(rng, n):
+def _low_q(rng, n, candidates=None):
     """Components 0 or ±1 (mod n): the longest wavelengths the cell holds."""
+    if candidates:
+        low = [q for q in candidates if all(abs(int(c)) <= 1 for c in q)]
+        if not low:
+            raise ValueError("split-specific q pool contains no low-q vectors")
+        return list(low[int(rng.integers(0, len(low)))])
     while True:
         q = [int(rng.choice([0, 1, n - 1])) for _ in range(3)]
         if any(q):
@@ -243,10 +304,11 @@ def _single_q_pattern(rng, rec_super, q_int, amp, pattern_class):
               pol.tolist(), pol_class, {"Mg": 1.0, "O": -1.0})]}
 
 
-def _mixed_pattern(rng, rec_super, n, amps, n_modes, pattern_class):
+def _mixed_pattern(rng, rec_super, n, amps, n_modes, pattern_class,
+                   q_candidates=None):
     modes = []
     for _ in range(n_modes):
-        q_int = _low_q(rng, n)
+        q_int = _low_q(rng, n, q_candidates)
         qhat = _unit(np.asarray(q_int, float) @ rec_super)
         if rng.random() < 0.5:
             pol, pol_class = qhat, "longitudinal"
@@ -258,6 +320,53 @@ def _mixed_pattern(rng, rec_super, n, amps, n_modes, pattern_class):
     return {"pattern_class": pattern_class, "modes": modes}
 
 
+def _sample_split_hint(rng, cfg):
+    """Deterministic approximate train/validation/test allocation."""
+    test = float(cfg["splits"]["test_fraction"])
+    val = float(cfg["splits"]["validation_fraction"])
+    x = float(rng.random())
+    if x < test:
+        return "test"
+    if x < test + val:
+        return "validation"
+    return "train"
+
+
+def q_split_pools(n, rec_super, cfg):
+    """Partition complete |q| shells before structure generation.
+
+    Mixed-mode structures draw every constituent q from one split-specific
+    pool.  This prevents the transitive shared-q graph from collapsing nearly
+    all finite-q structures into one holdout component after generation.
+    """
+    vectors = sorted({tuple(fold_q(q, n)) for q in np.ndindex(n, n, n)}
+                     - {(0, 0, 0)})
+    shells = {}
+    for q in vectors:
+        magnitude = round(float(np.linalg.norm(np.asarray(q) @ rec_super)), 10)
+        shells.setdefault(magnitude, []).append(q)
+    if len(shells) < 3:
+        raise ValueError(
+            f"main supercell n={n} has only {len(shells)} |q| shells; "
+            "cannot make leakage-safe train/validation/test q pools")
+    shell_ids = sorted(shells)
+    rng = np.random.default_rng([int(cfg["displacements"]["seed"]), 551903])
+    rng.shuffle(shell_ids)
+    n_shell = len(shell_ids)
+    n_test = max(1, int(round(float(cfg["splits"]["test_fraction"]) * n_shell)))
+    n_val = max(1, int(round(float(cfg["splits"]["validation_fraction"])
+                             * n_shell)))
+    if n_test + n_val >= n_shell:
+        n_test = n_val = 1
+    assignment = {
+        "test": shell_ids[:n_test],
+        "validation": shell_ids[n_test:n_test + n_val],
+        "train": shell_ids[n_test + n_val:],
+    }
+    return {name: sorted(q for shell in selected for q in shells[shell])
+            for name, selected in assignment.items()}
+
+
 def build_main(cfg, prim_cell):
     """Section-11 composition, one global seed, per-snapshot derived streams
     np.random.default_rng([seed, snapshot_index])."""
@@ -266,52 +375,62 @@ def build_main(cfg, prim_cell):
     amps = [float(a) for a in cfg["displacements"]["amplitudes"]]
     seed = cfg["displacements"]["seed"]
     rec_super = reciprocal(np.asarray(prim_cell, float) * n)
+    q_pools = q_split_pools(n, rec_super, cfg)
     plans, k = [], 1
 
-    def add(pattern, group_id):
+    def add(pattern, group_id, split_hint):
         nonlocal k
         plan = {"sid": _sid(k), "pattern": pattern,
                 "metadata": _metadata(n, prim_cell, pattern, group_id, k)}
+        plan["metadata"]["split_hint"] = split_hint
         plans.append(plan)
         k += 1
         return plan
 
     for _ in range(comp["single_q_optical"]):
         rng = np.random.default_rng([seed, k])
-        add(_single_q_pattern(rng, rec_super, _random_q(rng, n),
+        hint = _sample_split_hint(rng, cfg)
+        add(_single_q_pattern(rng, rec_super,
+                              _random_q(rng, n, q_pools[hint]),
                               float(rng.choice(amps)), "single_q_optical"),
-            _hash_id("grp", "main", n, "single_q", k))
+            _hash_id("grp", "main", n, "single_q", k), hint)
 
     for _ in range(comp["mixed_low_q"]):
         rng = np.random.default_rng([seed, k])
+        hint = _sample_split_hint(rng, cfg)
         add(_mixed_pattern(rng, rec_super, n, amps,
-                           int(rng.integers(2, 5)), "mixed_low_q"),
-            _hash_id("grp", "main", n, "mixed_low_q", k))
+                           int(rng.integers(2, 5)), "mixed_low_q",
+                           q_pools[hint]),
+            _hash_id("grp", "main", n, "mixed_low_q", k), hint)
 
     for _ in range(comp["random_local"]):
         rng = np.random.default_rng([seed, k])
+        hint = _sample_split_hint(rng, cfg)
         add({"pattern_class": "random_local", "modes": [],
              "random": {"index": k, "amplitude": float(rng.choice(amps))}},
-            _hash_id("grp", "main", n, "random_local", k))
+            _hash_id("grp", "main", n, "random_local", k), hint)
 
     for _ in range(comp["sign_paired_calibration"] // 2):
         rng = np.random.default_rng([seed, k])
+        hint = _sample_split_hint(rng, cfg)
         gid = _hash_id("grp", "main", n, "sign_pair", k)
-        base = _single_q_pattern(rng, rec_super, _random_q(rng, n),
+        base = _single_q_pattern(rng, rec_super,
+                                 _random_q(rng, n, q_pools[hint]),
                                  float(rng.choice(amps)),
                                  "sign_paired_calibration")
-        plus = add(base, gid)
+        plus = add(base, gid, hint)
         neg = json.loads(json.dumps(base))
         neg["modes"][0]["amplitude"] *= -1.0
-        minus = add(neg, gid)
+        minus = add(neg, gid, hint)
         plus["metadata"]["sign_partner_id"] = minus["sid"]
         minus["metadata"]["sign_partner_id"] = plus["sid"]
 
     for _ in range(comp["near_equilibrium"]):
         rng = np.random.default_rng([seed, k])
+        hint = _sample_split_hint(rng, cfg)
         add({"pattern_class": "near_equilibrium", "modes": [],
              "random": {"index": k, "amplitude": 0.5 * min(amps)}},
-            _hash_id("grp", "main", n, "near_equilibrium", k))
+            _hash_id("grp", "main", n, "near_equilibrium", k), hint)
     return plans
 
 

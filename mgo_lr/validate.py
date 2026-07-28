@@ -15,7 +15,8 @@ from .config import atomic_write_text, sha256_file
 from .constants import ATOMIC_NUMBERS
 from .convert import key_str, parse_key, read_blocks, species_orbital_info
 from .displacements import remove_uniform_translation
-from .lr import blocks_diff_norm, blocks_norm, minimum_image_displacements
+from .lr import (blocks_diff_norm, blocks_norm, expected_lr_definition,
+                 minimum_image_displacements)
 from .snapshot import SnapshotStore, load_reference
 from .structures import make_supercell
 
@@ -42,7 +43,13 @@ def check_keys_and_dims(blocks, norb):
     """1-based indices in range; shapes match orbital counts; finite values."""
     n_at = len(norb)
     for k, v in blocks.items():
-        r0, r1, r2, i, j = parse_key(k)
+        try:
+            r0, r1, r2, i, j = parse_key(k)
+        except (ValueError, TypeError, json.JSONDecodeError, IndexError) as exc:
+            return f"malformed key {k!r}: {exc}"
+        values = (r0, r1, r2, i, j)
+        if not all(isinstance(value, (int, np.integer)) for value in values):
+            return f"malformed key {k!r}: all entries must be integers"
         if not (1 <= i <= n_at and 1 <= j <= n_at):
             return f"key {k}: atom index out of range (must be 1..{n_at})"
         if v.shape != (norb[i - 1], norb[j - 1]):
@@ -53,7 +60,8 @@ def check_keys_and_dims(blocks, norb):
     return None
 
 
-def tier1_snapshot(cfg, folder, status, sc, born, ws_lr_def=None):
+def tier1_snapshot(cfg, folder, status, sc, born, ws_lr_def=None,
+                   expected_lr_def=None, ws_units=None):
     val = cfg["validation"]
     delta = float(val["delta"])
     failures, metrics = [], {}
@@ -64,11 +72,31 @@ def tier1_snapshot(cfg, folder, status, sc, born, ws_lr_def=None):
 
     if not status.get("scf_converged"):
         failures.append("scf_not_converged_in_status")
+    if status.get("lr_failed"):
+        failures.append(f"status records failed LR processing: "
+                        f"{status['lr_failed']}")
     out_dir = os.path.join(folder, "OUT.MgO")
-    for name, digest in status.get("raw_sha256", {}).items():
+    expected_raw = {cfg["abacus"]["csr_h_filename"],
+                    cfg["abacus"]["csr_s_filename"], "running_scf.log"}
+    recorded_raw = status.get("raw_sha256")
+    if not isinstance(recorded_raw, dict) \
+            or set(recorded_raw) != expected_raw \
+            or not all(recorded_raw.values()):
+        failures.append("missing_or_incomplete_raw_dft_sha256_provenance")
+        recorded_raw = recorded_raw if isinstance(recorded_raw, dict) else {}
+    for name, digest in recorded_raw.items():
         p = os.path.join(out_dir, name)
         if not os.path.exists(p) or sha256_file(p) != digest:
             failures.append(f"raw_dft_modified: {name}")
+    if ws_lr_def is None:
+        failures.append("workspace metadata.yaml lacks lr_definition")
+    elif expected_lr_def is not None and ws_lr_def != expected_lr_def:
+        failures.append("workspace lr_definition disagrees with current "
+                        "reference artifacts/config")
+    if ws_units != {"energy": "eV", "length": "angstrom", "charge": "e"}:
+        failures.append(f"invalid_or_missing_units_metadata: {ws_units}")
+    if not np.all(np.isfinite(born)):
+        failures.append("born_effective_charges contains NaN/Inf")
 
     types, norb, _ = species_orbital_info(cfg, sc.species)
     h_full = read_blocks(os.path.join(folder, "hamiltonians_full.h5"))
@@ -93,8 +121,13 @@ def tier1_snapshot(cfg, folder, status, sc, born, ws_lr_def=None):
     # order — the adversarial Mg->H swap must be caught here.
     expected_z = [ATOMIC_NUMBERS[s] for s in sc.species]
     try:
-        got_z = [int(round(x)) for x in
-                 np.atleast_1d(np.loadtxt(os.path.join(folder, "element.dat")))]
+        got_z_raw = np.atleast_1d(
+            np.loadtxt(os.path.join(folder, "element.dat"), dtype=float))
+        if not np.all(np.isfinite(got_z_raw)) \
+                or not np.all(got_z_raw == np.rint(got_z_raw)):
+            got_z = None
+        else:
+            got_z = [int(x) for x in got_z_raw]
     except (ValueError, OSError):
         got_z = None
     if got_z != expected_z:
@@ -107,17 +140,35 @@ def tier1_snapshot(cfg, folder, status, sc, born, ws_lr_def=None):
         failures.append(f"info.json inconsistent: {info}")
     lat = np.loadtxt(os.path.join(folder, "lat.dat"))
     rlat = np.loadtxt(os.path.join(folder, "rlat.dat"))
-    if not np.allclose(rlat.T @ lat, 2.0 * np.pi * np.eye(3), atol=1e-8):
+    pos = np.loadtxt(os.path.join(folder, "site_positions.dat")).T
+    u_stored = np.load(os.path.join(folder, "displacements.npy"))
+    numeric_arrays = {"lat.dat": lat, "rlat.dat": rlat,
+                      "site_positions.dat": pos,
+                      "displacements.npy": u_stored}
+    invalid_numeric = [name for name, value in numeric_arrays.items()
+                       if not np.all(np.isfinite(value))]
+    for name in invalid_numeric:
+        failures.append(f"{name} contains NaN/Inf")
+    if lat.shape != (3, 3) or rlat.shape != (3, 3):
+        failures.append(f"invalid lattice shapes: lat={lat.shape}, "
+                        f"rlat={rlat.shape}")
+    elif not np.allclose(rlat.T @ lat, 2.0 * np.pi * np.eye(3), atol=1e-8):
         failures.append("rlat/lat convention violated (need rlat^T lat = 2 pi I)")
     # full lattice agreement with the expected supercell, not merely internal
     # rlat/lat consistency (a jointly-scaled cell would otherwise slip through)
-    if not np.allclose(lat.T, sc.cell, atol=1e-6):
+    if lat.shape == (3, 3) and np.all(np.isfinite(lat)) \
+            and not np.allclose(lat.T, sc.cell, atol=1e-6):
         failures.append("lat.dat disagrees with the expected supercell lattice")
     # DFT positions must equal reference geometry + the recorded displacement
-    pos = np.loadtxt(os.path.join(folder, "site_positions.dat")).T
-    u_stored = np.load(os.path.join(folder, "displacements.npy"))
-    pos_err = float(np.abs(
-        minimum_image_displacements(sc.cell, pos, sc.cart) - u_stored).max())
+    if pos.shape != sc.cart.shape or u_stored.shape != sc.cart.shape:
+        failures.append(f"position/displacement shapes {pos.shape}/"
+                        f"{u_stored.shape} != {sc.cart.shape}")
+        pos_err = float("inf")
+    elif invalid_numeric:
+        pos_err = float("inf")
+    else:
+        pos_err = float(np.abs(
+            minimum_image_displacements(sc.cell, pos, sc.cart) - u_stored).max())
     metrics["position_reference_error"] = pos_err
     if pos_err > float(val.get("tau_position", 1e-6)):
         failures.append(f"site_positions vs reference mismatch = {pos_err:.3e}")
@@ -151,12 +202,18 @@ def tier1_snapshot(cfg, folder, status, sc, born, ws_lr_def=None):
         failures.append(f"reciprocal_set not verifiably sound: {rec}")
     if ws_lr_def is not None and lr_meta.get("lr_definition") != ws_lr_def:
         failures.append("lr_definition disagrees with workspace metadata.yaml")
-    metrics["r_imag"] = lr_meta["r_imag"]
-    metrics["lr_convergence"] = lr_meta["lr_convergence"]
-    if lr_meta["r_imag"] >= float(cfg["lr"]["imaginary_tolerance"]):
-        failures.append(f"imaginary_residual = {lr_meta['r_imag']:.3e}")
-    if lr_meta["lr_convergence"] >= float(val["tau_G"]):
-        failures.append(f"lr_convergence = {lr_meta['lr_convergence']:.3e}")
+    r_imag = float(lr_meta.get("r_imag", float("nan")))
+    lr_conv = float(lr_meta.get("lr_convergence", float("nan")))
+    metrics["r_imag"] = r_imag
+    metrics["lr_convergence"] = lr_conv
+    if not np.isfinite(r_imag):
+        failures.append("imaginary_residual is NaN/Inf")
+    elif r_imag >= float(cfg["lr"]["imaginary_tolerance"]):
+        failures.append(f"imaginary_residual = {r_imag:.3e}")
+    if not np.isfinite(lr_conv):
+        failures.append("lr_convergence is NaN/Inf")
+    elif lr_conv >= float(val["tau_G"]):
+        failures.append(f"lr_convergence = {lr_conv:.3e}")
 
     dmeta = json.load(open(os.path.join(folder,
                                         "displacement_metadata.json")))
@@ -241,11 +298,14 @@ def validate_stage(cfg, workspace, args):
     sc = make_supercell(ref["prim_cell"], ref["frac"], ref["species"],
                         cfg["supercells"][args.set_name])
     ws_meta_path = os.path.join(workspace, "metadata.yaml")
-    ws_lr_def = None
+    ws_lr_def, ws_units = None, None
     if os.path.exists(ws_meta_path):
         import yaml
         with open(ws_meta_path) as f:
-            ws_lr_def = (yaml.safe_load(f) or {}).get("lr_definition")
+            ws_meta = yaml.safe_load(f) or {}
+        ws_lr_def = ws_meta.get("lr_definition")
+        ws_units = ws_meta.get("units")
+    expected_def = expected_lr_definition(cfg, workspace)
     store = SnapshotStore(workspace, args.set_name)
     exit_code, results = 0, {}
     for sid in store.list():
@@ -254,7 +314,8 @@ def validate_stage(cfg, workspace, args):
                 or not store.state_at_least(sid, "lr_done"):
             continue
         failures, metrics = tier1_snapshot(cfg, store.folder(sid), st, sc,
-                                           born, ws_lr_def)
+                                           born, ws_lr_def, expected_def,
+                                           ws_units)
         qc = {"tier1": {"failures": failures, "metrics": metrics}}
         atomic_write_text(os.path.join(store.folder(sid),
                                        "quality_checks.json"),

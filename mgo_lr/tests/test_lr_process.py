@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import yaml
 
-from mgo_lr import convert, lr
+from mgo_lr import convert, export, lr
 from mgo_lr.config import load_config
 from mgo_lr.snapshot import SnapshotStore
 from mgo_lr.structures import make_supercell
@@ -66,6 +66,9 @@ def test_lr_process_equilibrium_zero(tmp_path):
     assert store.read_status(sid)["state"] == "lr_done"
     ws_meta = yaml.safe_load(open(os.path.join(ws, "metadata.yaml")))
     assert ws_meta["lr_definition"]["ewald_lambda"] == 1.0
+    fingerprints = ws_meta["lr_definition"]["reference_artifacts_sha256"]
+    assert set(fingerprints) == set(lr._REFERENCE_DEFINITION_FILES)
+    assert all(len(digest) == 64 for digest in fingerprints.values())
 
 
 def test_workspace_lr_definition_is_cell_size_invariant(tmp_path):
@@ -122,6 +125,19 @@ def test_lr_process_idempotent_and_lambda_guard(tmp_path):
         lr.lr_process_stage(cfg2, ws, args)            # refuses to mix Λ
 
 
+def test_lr_process_rejects_changed_reference_artifact(tmp_path):
+    ws, cfg, store, sid, sc = converted_snapshot(tmp_path)
+    assert lr.lr_process_stage(cfg, ws, Args()) == 0
+    born_path = os.path.join(ws, "reference", "born_effective_charges.npy")
+    born = np.load(born_path)
+    born[0, 0, 0] += 0.01
+    np.save(born_path, born)
+    args = Args()
+    args.force = True
+    with pytest.raises(SystemExit, match="lr_definition"):
+        lr.lr_process_stage(cfg, ws, args)
+
+
 def test_lr_process_imaginary_gate(tmp_path, monkeypatch):
     ws, cfg, store, sid, sc = converted_snapshot(
         tmp_path, u=np.array([[0.01, 0, 0], [-0.01, 0, 0]]))
@@ -136,3 +152,56 @@ def test_lr_process_imaginary_gate(tmp_path, monkeypatch):
     assert not os.path.exists(os.path.join(folder, "hamiltonians_lr.h5"))
     assert not os.path.exists(os.path.join(folder, "hamiltonians_sr.h5"))
     assert "lr_failed" in store.read_status(sid)
+
+
+def test_failed_forced_rerun_invalidates_old_labels_and_export(
+        tmp_path, monkeypatch):
+    ws, cfg, store, sid, sc = converted_snapshot(
+        tmp_path, u=np.array([[0.01, 0, 0], [-0.01, 0, 0]]))
+    assert lr.lr_process_stage(cfg, ws, Args()) == 0
+    export_args = Args()
+    export_args.target = "sr"
+    assert export.export_target_stage(cfg, ws, export_args) == 0
+
+    def broken(g, c, pts):
+        return np.full(len(np.atleast_2d(pts)), 1.0 + 1.0j)
+
+    monkeypatch.setattr(lr, "evaluate_potential", broken)
+    force_args = Args()
+    force_args.force = True
+    assert lr.lr_process_stage(cfg, ws, force_args) == 1
+    folder = store.folder(sid)
+    for name in ("hamiltonians_lr.h5", "hamiltonians_sr.h5",
+                 "hamiltonians.h5", "lr_metadata.json",
+                 "export_metadata.json", "quality_checks.json"):
+        assert not os.path.lexists(os.path.join(folder, name))
+    status = store.read_status(sid)
+    assert status["state"] == "converted"
+    assert status["lr_failed"]
+    assert status["r_imag"] is None
+    assert status["lr_convergence"] is None
+    metadata = yaml.safe_load(open(os.path.join(ws, "metadata.yaml")))
+    assert "training_target" not in metadata
+
+
+def test_unexpected_forced_rerun_error_leaves_no_stale_labels(
+        tmp_path, monkeypatch):
+    ws, cfg, store, sid, sc = converted_snapshot(
+        tmp_path, u=np.array([[0.01, 0, 0], [-0.01, 0, 0]]))
+    assert lr.lr_process_stage(cfg, ws, Args()) == 0
+
+    def crash(g, c, pts):
+        raise RuntimeError("synthetic evaluator crash")
+
+    monkeypatch.setattr(lr, "evaluate_potential", crash)
+    force_args = Args()
+    force_args.force = True
+    with pytest.raises(RuntimeError, match="synthetic evaluator crash"):
+        lr.lr_process_stage(cfg, ws, force_args)
+    folder = store.folder(sid)
+    for name in ("hamiltonians_lr.h5", "hamiltonians_sr.h5",
+                 "lr_metadata.json", "quality_checks.json"):
+        assert not os.path.lexists(os.path.join(folder, name))
+    status = store.read_status(sid)
+    assert status["state"] == "converted"
+    assert status["lr_rerun_pending"] is True

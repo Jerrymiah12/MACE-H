@@ -62,6 +62,41 @@ class DerivativeData:
         return sum(m.nbytes for grp in self.blocks.values() for m in grp.values())
 
 
+class _FoldPlan:
+    r''' cache of fold_key results for one supercell map.
+
+    fold_key depends only on the hopping key and the supercell shape, so over a
+    finite-difference sweep it returns the same answer for the same key a few
+    hundred times. Parsing the key with json.loads each time is what makes that
+    expensive, so memoise per (key, grid) instead. '''
+
+    def __init__(self, smap):
+        self.n_grid = smap.n_grid
+        self.n_uc_atoms = smap.n_uc_atoms
+        self._smap = smap
+        self._cache = {}
+
+    def matches(self, smap):
+        return smap.n_grid == self.n_grid and smap.n_uc_atoms == self.n_uc_atoms
+
+    def get(self, key_str):
+        hit = self._cache.get(key_str)
+        if hit is None:
+            hit = fold_key(json.loads(key_str), self._smap)
+            self._cache[key_str] = hit
+        return hit
+
+
+_FOLD_PLAN = None
+
+
+def _fold_plan_for(smap):
+    global _FOLD_PLAN
+    if _FOLD_PLAN is None or not _FOLD_PLAN.matches(smap):
+        _FOLD_PLAN = _FoldPlan(smap)
+    return _FOLD_PLAN
+
+
 def hermitize_blocks(H):
     r''' H_ij(R) <- (H_ij(R) + H_ji(-R)^dagger) / 2, matching the symmetrization the
     band-structure postprocessing applies to predicted Hamiltonians (Band.py,
@@ -105,6 +140,7 @@ def finite_difference_pair(predict_fn, positions0, smap, norb_cumsum, delta, kap
     H_plus = predict_fn(pos_plus)
     H_minus = predict_fn(pos_minus)
     assert H_plus.keys() == H_minus.keys()
+    plan = _fold_plan_for(smap)
     out = {}
     for key_str, hp in H_plus.items():
         d = (np.asarray(hp) - np.asarray(H_minus[key_str])) / (2.0 * delta)
@@ -115,7 +151,7 @@ def finite_difference_pair(predict_fn, positions0, smap, norb_cumsum, delta, kap
                 f'direction {"xyz"[alpha]}): the model produced nonfinite output')
         if np.abs(d).max() < grad_threshold:
             continue
-        p, R, i, j = fold_key(json.loads(key_str), smap)
+        p, R, i, j = plan.get(key_str)
         if (p, R) not in out:
             dtype = np.complex128 if np.iscomplexobj(d) else np.float64
             out[(p, R)] = np.zeros((norb_tot, norb_tot), dtype=dtype)
@@ -167,6 +203,48 @@ def stream_finite_difference(predict_fn, positions0, smap, norb_cumsum, delta, o
                     grp[str(list(p) + list(R))] = m
                 del out
     return H5DerivativeStore(out_path)
+
+
+def image_free_radius(sc_lattice):
+    r''' half the smallest perpendicular thickness of the supercell: the largest
+    separation at which a displaced atom cannot yet see its own periodic image.
+    Derivatives involving atoms further apart than this wrap around the cell. '''
+    inv = np.linalg.inv(np.asarray(sc_lattice, dtype=np.float64))
+    return 0.5 * min(1.0 / np.linalg.norm(inv[:, a]) for a in range(3))
+
+
+def contamination_profile(group, kappa, positions, uc_lattice, sc_lattice, norb_cumsum):
+    r''' (distance, max |dH|) for one (kappa, alpha) derivative group, resolved by the
+    separation between the displaced atom and the bra atom of each orbital block.
+
+    The physical dH/dtau decays monotonically with that separation. A supercell too
+    small for the model's receptive field breaks the decay: beyond the image-free
+    radius the displaced atom couples to its own periodic images and |dH| stops
+    falling, or rises again. Comparing the two regimes turns that failure into a
+    number instead of an unconditional warning about a receptive field that a
+    tractable supercell can rarely satisfy.
+
+    positions/uc_lattice describe the unit cell; sc_lattice the displacement supercell. '''
+    positions = np.asarray(positions, dtype=np.float64)
+    uc_lattice = np.asarray(uc_lattice, dtype=np.float64)
+    sc_lattice = np.asarray(sc_lattice, dtype=np.float64)
+    inv_sc = np.linalg.inv(sc_lattice)
+    norb_cumsum = np.asarray(norb_cumsum)
+    n_uc_atoms = len(norb_cumsum) - 1
+    dists, vals = [], []
+    for (p, R), dense in group.items():
+        # displaced atom sits in cell p relative to the bra atom's cell
+        origin = positions[kappa] + np.asarray(p, dtype=np.float64) @ uc_lattice
+        for i in range(n_uc_atoms):
+            block = dense[norb_cumsum[i]:norb_cumsum[i + 1], :]
+            if block.size == 0:
+                continue
+            sep = origin - positions[i]
+            frac = sep @ inv_sc
+            frac -= np.round(frac)
+            dists.append(float(np.linalg.norm(frac @ sc_lattice)))
+            vals.append(float(np.abs(block).max()))
+    return np.asarray(dists), np.asarray(vals)
 
 
 def acoustic_sum_rule(deriv):

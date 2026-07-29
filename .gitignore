@@ -1,2 +1,18 @@
 __pycache__/
 *.pyc
+
+# EPC run artifacts (default output_dir from configs/epc.ini)
+epc_output/
+epc_run.log
+
+# Local personal configs
+my_epc.ini
+
+# local CUDA 12.8 environment (see requirements.txt).
+# .venv is a symlink to ~/.local/share/maceh-epc/venv, so no trailing slash.
+.venv
+.tools
+
+# Wormholed working copy of the sibling MACE-H project (~11 GB: bulk_gold_data,
+# dataset, trained models). Referenced by the local EPC configs, never tracked here.
+MACE-H/

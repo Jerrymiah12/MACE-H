@@ -15,6 +15,7 @@ from torch import optim
 from torch.utils.data import SubsetRandomSampler, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+from .compat_scatter import install_torch_scatter_shim
 from .data import AijData
 from .graph import Collater, convert_ijji
 # from .model import Net
@@ -606,6 +607,9 @@ class DeepHE3Kernel:
         
         print('Building model...')
         begin = time.time()
+        # the checkpoint's frozen source snapshot may import torch_scatter, which is
+        # no longer part of the environment; satisfy it without editing the archive
+        install_torch_scatter_shim()
         from build_model import net
         print(f'Finished building model, cost {time.time() - begin:.2f} seconds.')
         

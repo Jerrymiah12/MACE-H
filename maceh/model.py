@@ -3,7 +3,7 @@ import os
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch_scatter import scatter
+from .compat_scatter import scatter
 from e3nn.nn import Gate
 from e3nn.o3 import Irreps, Linear, SphericalHarmonics, FullyConnectedTensorProduct
 from .from_nequip.cutoffs import PolynomialCutoff

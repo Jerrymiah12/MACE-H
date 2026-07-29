@@ -1,0 +1,39 @@
+# MACE-H-EPC environment for CUDA 12.8+ / Blackwell (RTX 5090, sm_120).
+#
+# Replaces the CUDA 11.8 pins in environment.yml, which cannot run on sm_120
+# ("no kernel image is available for execution on the device"). Keep
+# environment.yml around for the cu118 cluster nodes (4090 / sm_89).
+#
+# Deliberately dropped: torch-scatter, torch-sparse, torch-cluster,
+# torch-spline-conv, pyg-lib. Only torch_scatter.scatter was ever imported and
+# maceh/compat_scatter.py now falls back to the vendored pure-PyTorch
+# implementation in maceh/from_mfn/scatter.py. torch-geometric itself is pure
+# Python and stays.
+#
+# Install:  uv pip install -r requirements.txt --torch-backend=cu128
+
+torch>=2.7
+torchvision
+torch-geometric>=2.6
+
+e3nn>=0.5.6
+opt-einsum-fx
+
+ase
+h5py
+numpy
+scipy
+sympy
+matplotlib
+seaborn
+tqdm
+pathos
+tensorboard
+wandb
+
+# structure / periodic-table utilities used by the pre/post-processing tools
+pymatgen
+spglib
+mendeleev
+
+pytest

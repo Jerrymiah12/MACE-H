@@ -6,6 +6,8 @@ import h5py
 
 # memory budget for one k-batch of the complex accumulator in write_epc_cartesian_h5
 BATCH_BYTES = 16 * 1024 ** 2
+# memory budget for the stacked derivative blocks group_q_slab feeds to BLAS
+SLAB_STACK_BYTES = 256 * 1024 ** 2
 
 
 def displaced_atoms(deriv):
@@ -15,13 +17,42 @@ def displaced_atoms(deriv):
 def group_q_slab(blocks, kpts, q, norb):
     r''' contribution of one already-loaded (kappa, alpha) derivative group at a
     single q: sum_p e^{2 pi i q.p} sum_R e^{2 pi i k.R} [dH(p, R)]_ij (cell-phase
-    gauge), shape (nk, norb, norb) '''
+    gauge), shape (nk, norb, norb).
+
+    The sum is a matrix product -- phases (nk, n_blocks) times flattened blocks
+    (n_blocks, norb^2) -- so it is handed to BLAS rather than accumulated block by
+    block. Doing it termwise costs a full (nk, norb, norb) complex temporary per
+    block (tens of MiB each, hundreds of blocks per group), which makes the stage
+    memory-bandwidth bound; as one GEMM each block is read once. Real derivative
+    blocks stay real all the way into BLAS and only the phases are complex, which
+    halves the traffic again.
+
+    Blocks are stacked in the order the mapping yields them and reduced in that
+    order for every k, so the result does not depend on how the caller batches k. '''
+    kpts = np.asarray(kpts, dtype=np.float64)
     q = np.asarray(q, dtype=np.float64)
     acc = np.zeros((len(kpts), norb, norb), dtype=np.complex128)
-    for (p, R), m in blocks.items():
-        phase_q = np.exp(2j * np.pi * (q @ np.asarray(p, dtype=np.float64)))
-        phase_k = np.exp(2j * np.pi * (kpts @ np.asarray(R, dtype=np.float64)))
-        acc += (phase_q * phase_k)[:, None, None] * m
+    if not blocks or len(kpts) == 0:
+        return acc
+    acc_flat = acc.reshape(len(kpts), norb * norb)
+
+    items = list(blocks.items())
+    per_block = norb * norb * 8
+    chunk = max(1, SLAB_STACK_BYTES // max(per_block, 1))
+    for c0 in range(0, len(items), chunk):
+        part = items[c0:c0 + chunk]
+        ps = np.array([pR[0] for pR, _ in part], dtype=np.float64)
+        Rs = np.array([pR[1] for pR, _ in part], dtype=np.float64)
+        # (nk, n_part): e^{2 pi i q.p} e^{2 pi i k.R}
+        phase = (np.exp(2j * np.pi * (ps @ q))[None, :]
+                 * np.exp(2j * np.pi * (kpts @ Rs.T)))
+        stack = np.stack([np.asarray(m).reshape(-1) for _, m in part])
+        if np.iscomplexobj(stack):
+            acc_flat += phase @ stack
+        else:
+            # real blocks: two real GEMMs instead of one complex one
+            acc_flat.real += phase.real @ stack
+            acc_flat.imag += phase.imag @ stack
     return acc
 
 
